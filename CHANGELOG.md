@@ -23,9 +23,9 @@ Requests to known Twitch ad-serving domains are now failed immediately at the `N
 - `spade.twitch.tv`
 - `secure-sts-prod.imrworldwide.com`
 
-### Note — Default proxy (`proxy.level3tjg.me`) is currently unreachable
+### Note — Default proxy is currently unreachable
 
-`proxy.level3tjg.me:6375` times out as of 2026-05-07. The address is retained in `Config.h` as the default and will resume working if the service comes back online. Use a custom proxy in the meantime.
+Default `proxy` times out as of 2026-05-07. The address is retained in `Config.h` as the default and will resume working if the service comes back online. Use a custom proxy in the meantime.
 
 ---
 
