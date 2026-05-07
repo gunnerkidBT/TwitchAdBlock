@@ -65,6 +65,7 @@ TWAdBlockAssetResourceLoaderDelegate *assetResourceLoaderDelegate;
 }
 %end
 
+// Asset resource loader delegate hook — present in older Twitch versions; silently skipped if missing.
 %hook _TtC6Twitch27AssetResourceLoaderDelegate
 %new
 - (BOOL)handleLoadingRequest:(AVAssetResourceLoadingRequest *)loadingRequest {
@@ -149,7 +150,8 @@ static void *hook_swift_unknownObjectWeakLoadStrong(void *ref) {
   return result;
 }
 
-// Block ads in feed tab
+// Block ads in feed tab — hook old TKURLSessionClient name (pre-29.x) and Apollo name (29.x+).
+// Whichever class doesn't exist at runtime is silently skipped.
 
 %hook _TtC9TwitchKit18TKURLSessionClient
 - (void)URLSession:(NSURLSession *)session
@@ -160,36 +162,51 @@ static void *hook_swift_unknownObjectWeakLoadStrong(void *ref) {
 }
 %end
 
-// Block ads in following tab
+// Apollo.URLSessionClient — used in Twitch 29.x+
+%hook _TtC6Apollo16URLSessionClient
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+    didReceiveData:(NSData *)data {
+  if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
+  %orig(session, dataTask, [data twab_responseDataForRequest:dataTask.currentRequest]);
+}
+%end
+
+// Block ads in following tab.
+// All init variants are listed; Logos silently skips selectors that don't exist.
 
 %hook _TtC6Twitch23FollowingViewController
+
+static void twab_clearFollowingAds(id self) {
+  Ivar headlinerManagerIvar = class_getInstanceVariable(object_getClass(self), "headlinerManager");
+  if (!headlinerManagerIvar) return;
+  Ivar displayAdStateManagerIvar =
+      class_getInstanceVariable(object_getClass(self), "displayAdStateManager");
+  if (displayAdStateManagerIvar) object_setIvar(self, displayAdStateManagerIvar, nil);
+}
+
+// Pre-29.x (2-arg)
 - (instancetype)initWithGraphQL:(_TtC9TwitchKit9TKGraphQL *)graphQL
-                   themeManager:(_TtC12TwitchCoreUI21TWDefaultThemeManager *)themeManager {
+                   themeManager:(id)themeManager {
   if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
-  if ((self = %orig)) {
-    Ivar headlinerManagerIvar =
-        class_getInstanceVariable(object_getClass(self), "headlinerManager");
-    if (headlinerManagerIvar) {
-      Ivar displayAdStateManagerIvar =
-          class_getInstanceVariable(object_getClass(self), "displayAdStateManager");
-      if (displayAdStateManagerIvar) object_setIvar(self, displayAdStateManagerIvar, nil);
-    }
-  }
+  if ((self = %orig)) twab_clearFollowingAds(self);
   return self;
 }
+// 23.x – 28.x (3-arg)
 - (instancetype)initWithGraphQL:(_TtC9TwitchKit9TKGraphQL *)graphQL
-                   themeManager:(_TtC12TwitchCoreUI21TWDefaultThemeManager *)themeManager
+                   themeManager:(id)themeManager
                   urlController:(_TtC6Twitch13URLController *)urlController {
   if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
-  if ((self = %orig)) {
-    Ivar headlinerManagerIvar =
-        class_getInstanceVariable(object_getClass(self), "headlinerManager");
-    if (headlinerManagerIvar) {
-      Ivar displayAdStateManagerIvar =
-          class_getInstanceVariable(object_getClass(self), "displayAdStateManager");
-      if (displayAdStateManagerIvar) object_setIvar(self, displayAdStateManagerIvar, nil);
-    }
-  }
+  if ((self = %orig)) twab_clearFollowingAds(self);
+  return self;
+}
+// 29.x+ (4-arg)
+- (instancetype)initWithGraphQL:(_TtC9TwitchKit9TKGraphQL *)graphQL
+                   themeManager:(id)themeManager
+                  urlController:(_TtC6Twitch13URLController *)urlController
+                   isInitialTab:(BOOL)isInitialTab {
+  if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
+  if ((self = %orig)) twab_clearFollowingAds(self);
   return self;
 }
 %end

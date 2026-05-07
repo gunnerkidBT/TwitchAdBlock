@@ -27,6 +27,7 @@ TWEAK_NAME = TwitchAdBlock
 
 $(TWEAK_NAME)_FILES = $(filter-out Sideloaded.x, $(wildcard *.x)) $(wildcard *.*m) fishhook/fishhook.c
 $(TWEAK_NAME)_CFLAGS = -fobjc-arc -Iinclude -DPACKAGE_VERSION=@\"$(PACKAGE_VERSION)\"
+$(TWEAK_NAME)_LDFLAGS = -Wl,-undefined,dynamic_lookup
 $(TWEAK_NAME)_LOGOS_DEFAULT_GENERATOR = internal
 ifeq ($(SIDELOADED),1)
   $(TWEAK_NAME)_FILES += Sideloaded.x

@@ -1,23 +1,12 @@
 #import "Settings.h"
-
-extern NSUserDefaults *tweakDefaults;
+#import "Tweak.h"
 
 %hook _TtC6Twitch25AccountMenuViewController
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
   if (indexPath.section == [self numberOfSectionsInTableView:tableView] - 1 &&
       indexPath.row == [self tableView:tableView numberOfRowsInSection:indexPath.section] - 1) {
-    UITableViewStyle tableViewStyle = UITableViewStyleGrouped;
-    if (@available(iOS 13, *)) tableViewStyle = UITableViewStyleInsetGrouped;
-    TWAdBlockSettingsViewController *adblockSettingsViewController =
-        [[objc_getClass("TWAdBlockSettingsViewController") alloc]
-            initWithTableViewStyle:tableViewStyle
-                      themeManager:[objc_getClass("_TtC12TwitchCoreUI21TWDefaultThemeManager")
-                                       defaultThemeManager]];
-    adblockSettingsViewController.tableView.separatorStyle =
-        UITableViewCellSeparatorStyleSingleLine;
-    return [self.navigationController pushViewController:adblockSettingsViewController
-
-                                                animated:YES];
+    TWABSettingsVC *vc = [TWABSettingsVC settingsVC];
+    return [self.navigationController pushViewController:vc animated:YES];
   }
   %orig;
 }
@@ -30,24 +19,11 @@ extern NSUserDefaults *tweakDefaults;
          cellForRowAtIndexPath:(NSIndexPath *)indexPath {
   if (indexPath.section == [self numberOfSectionsInTableView:tableView] - 1 &&
       indexPath.row == [self tableView:tableView numberOfRowsInSection:indexPath.section] - 1) {
-    _TtC6Twitch34ConfigurableAccessoryTableViewCell *cell =
-        [[objc_getClass("_TtC6Twitch34ConfigurableAccessoryTableViewCell") alloc]
-              initWithStyle:UITableViewCellStyleSubtitle
-            reuseIdentifier:@"Twitch.ConfigurableAccessoryTableViewCell"];
-    [cell configureWithTitle:@"TwitchAdBlock"];
-    NSBundle *twCoreUIBundle = [NSBundle bundleWithIdentifier:@"twitch.TwitchCoreUI"];
-    cell.accessoryView =
-        [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"arrow-forward-Icon"
-                                                                    inBundle:twCoreUIBundle
-                                               compatibleWithTraitCollection:nil]];
-    cell.useDefaultBackgroundColor = YES;
-    Ivar customImageViewIvar = class_getInstanceVariable(object_getClass(cell), "customImageView");
-    if (!customImageViewIvar) return cell;
-    UIImageView *customImageView = object_getIvar(cell, customImageViewIvar);
-    customImageView.image = [UIImage imageNamed:@"Un-Host-Icon"
-                                       inBundle:twCoreUIBundle
-                  compatibleWithTraitCollection:nil];
-    customImageView.hidden = NO;
+    UITableViewCell *cell = [[UITableViewCell alloc]
+        initWithStyle:UITableViewCellStyleDefault
+      reuseIdentifier:@"TwitchAdBlockEntry"];
+    cell.textLabel.text = @"TwitchAdBlock";
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
   }
   return %orig;

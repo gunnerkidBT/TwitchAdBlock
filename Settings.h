@@ -3,4 +3,4 @@
 #import <Twitch/ConfigurableAccessoryTableViewCell.h>
 #import <Twitch/SettingsDisclosureCell.h>
 
-#import "TWAdBlockSettingsViewController.h"
+#import "TWABSettingsVC.h"

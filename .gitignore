@@ -1,1 +1,5 @@
 *.ipa
+.theos/
+packages/
+*.dSYM
+Resources
