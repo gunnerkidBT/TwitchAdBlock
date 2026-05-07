@@ -4,6 +4,31 @@ All notable changes from the original [level3tjg/TwitchAdBlock](https://github.c
 
 ---
 
+## [Fork] — 2026-05-07 (continued)
+
+### Fixed — Proxy silently ignored for standard HTTP proxies
+
+`twab_URLWithProxyURL:` pings `<proxy>/ping` to detect Luminous-style reverse proxies. Standard HTTP proxies (including authenticated `user:pass@host:port` proxies) return non-200, causing the method to return the original URL unchanged — leaving no proxy applied at all. Fixed: if the URL is not rewritten (not a Luminous proxy), both the `NSURLSession` hooks and the `AVURLAsset` hook now fall back to `connectionProxyDictionary` via `twab_proxySessionWithAddress:`. Luminous-style proxies (where `/ping` returns 200) continue to use URL rewriting as before.
+
+### Fixed — `playlist.ttvnw.net` not intercepted for proxy routing
+
+Twitch 29.x issues HLS playlist requests to both `usher.ttvnw.net` and `playlist.ttvnw.net`. The proxy host check only matched `usher.ttvnw.net`, so any request to `playlist.ttvnw.net` bypassed proxy routing entirely. Both hosts are now matched in a shared `twab_isPlaylistHost()` helper used by all three hook sites (`dataTaskWithRequest:`, `uploadTaskWithRequest:`, `AVURLAsset initWithURL:`).
+
+### Added — Network-level ad domain blocking
+
+Requests to known Twitch ad-serving domains are now failed immediately at the `NSURLSession` hook level, independent of the proxy setting. Blocked hosts sourced from TCDB (Twitch CDN Debugger) config observed on Twitch 29.2:
+
+- `edge.ads.twitch.tv`
+- `amazon-adsystem.com` / `s.amazon-adsystem.com` / `c.amazon-adsystem.com`
+- `spade.twitch.tv`
+- `secure-sts-prod.imrworldwide.com`
+
+### Note — Default proxy (`proxy.level3tjg.me`) is currently unreachable
+
+`proxy.level3tjg.me:6375` times out as of 2026-05-07. The address is retained in `Config.h` as the default and will resume working if the service comes back online. Use a custom proxy in the meantime.
+
+---
+
 ## [Fork] — 2026-05-07
 
 ### Fixed — Settings screen crash on iOS 26 / sideloaded dylibs
