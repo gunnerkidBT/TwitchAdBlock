@@ -5,18 +5,45 @@ NSBundle *tweakBundle;
 NSUserDefaults *tweakDefaults;
 TWAdBlockAssetResourceLoaderDelegate *assetResourceLoaderDelegate;
 
+// Ad-domain blocklist — requests to these hosts are failed immediately.
+static BOOL twab_isAdHost(NSString *host) {
+  static NSSet *adHosts;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    adHosts = [NSSet setWithObjects:
+      @"edge.ads.twitch.tv",
+      @"amazon-adsystem.com",
+      @"s.amazon-adsystem.com",
+      @"c.amazon-adsystem.com",
+      @"spade.twitch.tv",
+      @"secure-sts-prod.imrworldwide.com",
+      nil];
+  });
+  if ([adHosts containsObject:host]) return YES;
+  // suffix match for *.cloudfront.net/om-resources/ handled at URL level elsewhere
+  return NO;
+}
+
+// Playlist hosts to route through proxy.
+static BOOL twab_isPlaylistHost(NSString *host) {
+  return [host isEqualToString:@"usher.ttvnw.net"] ||
+         [host isEqualToString:@"playlist.ttvnw.net"];
+}
+
 // Server-side video ad blocking
 
 %hook NSURLSession
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
   if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
+  if (twab_isAdHost(request.URL.host))
+    return nil;
   if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
   ((NSMutableURLRequest *)request).HTTPBody = [request.HTTPBody twab_requestDataForRequest:request];
   if (![tweakDefaults boolForKey:@"TWAdBlockProxyEnabled"]) return %orig;
   NSString *proxy = [tweakDefaults boolForKey:@"TWAdBlockCustomProxyEnabled"]
                         ? [tweakDefaults stringForKey:@"TWAdBlockProxy"]
                         : PROXY_ADDR;
-  if (![request.URL.host isEqualToString:@"usher.ttvnw.net"]) return %orig;
+  if (!twab_isPlaylistHost(request.URL.host)) return %orig;
   NSURL *proxyURL = [NSURL URLWithString:proxy];
   if ([proxyURL.scheme hasPrefix:@"http"]) {
     NSURL *rewritten = [request.URL twab_URLWithProxyURL:proxyURL];
@@ -30,13 +57,15 @@ TWAdBlockAssetResourceLoaderDelegate *assetResourceLoaderDelegate;
 - (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request
                                          fromData:(NSData *)bodyData {
   if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
+  if (twab_isAdHost(request.URL.host))
+    return nil;
   if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
   bodyData = [bodyData twab_requestDataForRequest:request];
   if (![tweakDefaults boolForKey:@"TWAdBlockProxyEnabled"]) return %orig;
   NSString *proxy = [tweakDefaults boolForKey:@"TWAdBlockCustomProxyEnabled"]
                         ? [tweakDefaults stringForKey:@"TWAdBlockProxy"]
                         : PROXY_ADDR;
-  if (![request.URL.host isEqualToString:@"usher.ttvnw.net"]) return %orig;
+  if (!twab_isPlaylistHost(request.URL.host)) return %orig;
   NSURL *proxyURL = [NSURL URLWithString:proxy];
   if ([proxyURL.scheme hasPrefix:@"http"]) {
     NSURL *rewritten = [request.URL twab_URLWithProxyURL:proxyURL];
@@ -53,7 +82,7 @@ TWAdBlockAssetResourceLoaderDelegate *assetResourceLoaderDelegate;
 - (instancetype)initWithURL:(NSURL *)URL options:(NSDictionary<NSString *, id> *)options {
   if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"] ||
       ![tweakDefaults boolForKey:@"TWAdBlockProxyEnabled"] ||
-      ![URL.scheme isEqualToString:@"https"] || ![URL.host isEqualToString:@"usher.ttvnw.net"])
+      ![URL.scheme isEqualToString:@"https"] || !twab_isPlaylistHost(URL.host))
     return %orig;
   NSURL *proxyURL = [NSURL URLWithString:[tweakDefaults boolForKey:@"TWAdBlockCustomProxyEnabled"]
                                              ? [tweakDefaults stringForKey:@"TWAdBlockProxy"]
