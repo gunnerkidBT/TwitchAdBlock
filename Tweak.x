@@ -18,11 +18,14 @@ TWAdBlockAssetResourceLoaderDelegate *assetResourceLoaderDelegate;
                         : PROXY_ADDR;
   if (![request.URL.host isEqualToString:@"usher.ttvnw.net"]) return %orig;
   NSURL *proxyURL = [NSURL URLWithString:proxy];
-  if ([proxyURL.scheme hasPrefix:@"http"])
-    ((NSMutableURLRequest *)request).URL = [request.URL twab_URLWithProxyURL:proxyURL];
-  else
-    return &%orig([self twab_proxySessionWithAddress:proxy], _cmd, request);
-  return %orig;
+  if ([proxyURL.scheme hasPrefix:@"http"]) {
+    NSURL *rewritten = [request.URL twab_URLWithProxyURL:proxyURL];
+    if (![rewritten isEqual:request.URL]) {
+      ((NSMutableURLRequest *)request).URL = rewritten;
+      return %orig;
+    }
+  }
+  return &%orig([self twab_proxySessionWithAddress:proxy], _cmd, request);
 }
 - (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request
                                          fromData:(NSData *)bodyData {
@@ -35,11 +38,14 @@ TWAdBlockAssetResourceLoaderDelegate *assetResourceLoaderDelegate;
                         : PROXY_ADDR;
   if (![request.URL.host isEqualToString:@"usher.ttvnw.net"]) return %orig;
   NSURL *proxyURL = [NSURL URLWithString:proxy];
-  if ([proxyURL.scheme hasPrefix:@"http"])
-    ((NSMutableURLRequest *)request).URL = [request.URL twab_URLWithProxyURL:proxyURL];
-  else
-    return &%orig([self twab_proxySessionWithAddress:proxy], _cmd, request, bodyData);
-  return %orig;
+  if ([proxyURL.scheme hasPrefix:@"http"]) {
+    NSURL *rewritten = [request.URL twab_URLWithProxyURL:proxyURL];
+    if (![rewritten isEqual:request.URL]) {
+      ((NSMutableURLRequest *)request).URL = rewritten;
+      return %orig;
+    }
+  }
+  return &%orig([self twab_proxySessionWithAddress:proxy], _cmd, request, bodyData);
 }
 %end
 
@@ -52,8 +58,11 @@ TWAdBlockAssetResourceLoaderDelegate *assetResourceLoaderDelegate;
   NSURL *proxyURL = [NSURL URLWithString:[tweakDefaults boolForKey:@"TWAdBlockCustomProxyEnabled"]
                                              ? [tweakDefaults stringForKey:@"TWAdBlockProxy"]
                                              : PROXY_ADDR];
-  if ([proxyURL.scheme hasPrefix:@"http"])
-    return %orig([URL twab_URLWithProxyURL:proxyURL], options);
+  if ([proxyURL.scheme hasPrefix:@"http"]) {
+    NSURL *rewritten = [URL twab_URLWithProxyURL:proxyURL];
+    if (![rewritten isEqual:URL])
+      return %orig(rewritten, options);
+  }
   NSURLComponents *components = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:YES];
   components.scheme = @"twab";
   URL = components.URL;
