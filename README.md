@@ -21,6 +21,60 @@ See [CHANGELOG.md](CHANGELOG.md) for full details.
 
 ---
 
+## Building from source
+
+### Requirements
+
+- Windows 10/11 with WSL (Ubuntu) — or any Linux/macOS machine
+- [Theos](https://theos.dev/docs/installation) installed in WSL at `~/theos`
+- A **decrypted** Twitch IPA (the App Store IPA is encrypted and cannot be patched)
+- Python 3
+
+### 1. Install Theos (first time only)
+
+Open WSL and run:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+```
+
+### 2. Clone this repo
+
+```bash
+git clone https://github.com/gunnerkidBT/TwitchAdBlock.git
+cd TwitchAdBlock
+git submodule update --init --recursive
+```
+
+### 3. Build the dylib
+
+```bash
+export THEOS=~/theos
+export PATH=$THEOS/bin:$PATH
+make SIDELOADED=1
+```
+
+The compiled dylib will be at `.theos/obj/debug/TwitchAdBlock.dylib`.
+
+### 4. Inject into the IPA
+
+```bash
+python3 inject_ipa.py /path/to/Twitch-decrypted.ipa \
+    .theos/obj/debug/TwitchAdBlock.dylib \
+    Twitch-patched.ipa
+```
+
+> `inject_ipa.py` is located one directory above this repo at `../inject_ipa.py` if you cloned into the same layout used during development.
+
+### 5. Install
+
+| Method | Steps |
+|--------|-------|
+| **TrollStore** | Open TrollStore → tap `+` → select the patched IPA |
+| **AltStore / SideStore** | Drag the patched IPA into the app to sideload and sign |
+
+---
+
 ## Original project
 
 - **Author:** [level3tjg](https://github.com/level3tjg)
