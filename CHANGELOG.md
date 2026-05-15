@@ -4,6 +4,34 @@ All notable changes from the original [level3tjg/TwitchAdBlock](https://github.c
 
 ---
 
+## [Fork] — 2026-05-15
+
+### Added — Third-party emote rendering (7TV / BTTV / FrankerFaceZ)
+
+Emotes from 7TV, BetterTTV, and FrankerFaceZ now render inline alongside native Twitch emotes in chat. Implementation in `Emotes.x`:
+
+1. **IRC tag injection** — `NSURLSessionWebSocketTask.receiveMessageWithCompletionHandler:` is hooked (both `NSURLSessionWebSocketTask` and the private `__NSURLSessionWebSocketTask`). Each incoming IRC frame is parsed for PRIVMSG, the message body is scanned for known emote words, and synthetic numeric emote IDs (≥ `9_000_000_000` so they never collide with real Twitch IDs) are appended to the IRC `emotes=` tag. Twitch's Kotlin Multiplatform parser in `KMPMobileChat.framework` then produces normal `EmoteToken` objects from the tag — no need to construct Kotlin/Native objects from ObjC.
+
+2. **URL redirect** — `__NSURLSessionLocal.dataTaskWithRequest:` is hooked to detect outgoing requests for `static-cdn.jtvnw.net/emoticons/v2/{syntheticId}/...` and rewrite the URL to the real provider CDN:
+   - 7TV → `cdn.7tv.app/emote/{id}/2x.webp`
+   - BTTV → `cdn.betterttv.net/emote/{id}/2x`
+   - FFZ → `cdn.frankerfacez.com/emote/{id}/2`
+
+3. **Per-channel emote loading** — when a new `room-id=` is seen in a PRIVMSG, the channel's 7TV, BTTV, and FFZ emote sets are fetched asynchronously from the providers' public APIs. Global emote sets are fetched once at dylib load. All registry operations go through a concurrent dispatch queue with barrier writes.
+
+4. **Settings toggle** — new "3rd-Party Emotes" switch in the TwitchAdBlock settings (defaults ON, key `TWEmotesEnabled`). Both hooks are gated by this preference for instant on/off.
+
+### Changed — Deployment target bumped to iOS 13.0
+
+`NSURLSessionWebSocketTask` is iOS 13+ only. The Twitch app itself requires iOS 14+, so this is a no-op for end users.
+
+### Known limitations
+
+- **Animated emotes render as a static first frame.** Twitch decides static vs animated via `MessageStringImageData.isAnimated`, but the rendering pipeline does not call `initWithStaticURL:animatedURL:isAnimated:isAvatar:` for emotes whose IDs aren't in Twitch's emote catalog — verified by swizzling the init and observing it is never invoked. The actual hook target for forcing animation has not yet been identified.
+- **Your own outgoing messages don't get emote rendering.** Twitch tokenizes the local user's own messages locally before the IRC echo arrives, so our `emotes=` injection on the echo is ignored. Emotes still render for everyone else watching, including your messages on their screens.
+
+---
+
 ## [Fork] — 2026-05-07 (continued)
 
 ### Fixed — Proxy silently ignored for standard HTTP proxies

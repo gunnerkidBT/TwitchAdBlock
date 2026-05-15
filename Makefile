@@ -14,7 +14,7 @@ ifeq ($(LTS),1)
   PACKAGE_VERSION := $(PACKAGE_VERSION)-LTS
 endif
 
-TARGET := iphone:clang:latest:12.4
+TARGET := iphone:clang:latest:13.0
 INSTALL_TARGET_PROCESSES = Twitch
 
 ARCHS = arm64

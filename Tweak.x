@@ -290,5 +290,7 @@ static void twab_clearFollowingAds(id self) {
     [tweakDefaults setBool:NO forKey:@"TWAdBlockProxyEnabled"];
   if (![tweakDefaults objectForKey:@"TWAdBlockCustomProxyEnabled"])
     [tweakDefaults setBool:NO forKey:@"TWAdBlockCustomProxyEnabled"];
+  if (![tweakDefaults objectForKey:@"TWEmotesEnabled"])
+    [tweakDefaults setBool:YES forKey:@"TWEmotesEnabled"];
   assetResourceLoaderDelegate = [[TWAdBlockAssetResourceLoaderDelegate alloc] init];
 }

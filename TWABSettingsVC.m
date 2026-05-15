@@ -10,6 +10,7 @@ extern NSUserDefaults *tweakDefaults;
 @property (nonatomic, assign) BOOL adblockEnabled;
 @property (nonatomic, assign) BOOL proxyEnabled;
 @property (nonatomic, assign) BOOL customProxyEnabled;
+@property (nonatomic, assign) BOOL emotesEnabled;
 @end
 
 @implementation TWABSettingsVC
@@ -32,6 +33,7 @@ extern NSUserDefaults *tweakDefaults;
         _adblockEnabled     = [tweakDefaults boolForKey:@"TWAdBlockEnabled"];
         _proxyEnabled       = [tweakDefaults boolForKey:@"TWAdBlockProxyEnabled"];
         _customProxyEnabled = [tweakDefaults boolForKey:@"TWAdBlockCustomProxyEnabled"];
+        _emotesEnabled      = [tweakDefaults boolForKey:@"TWEmotesEnabled"];
     }
     return self;
 }
@@ -44,15 +46,25 @@ extern NSUserDefaults *tweakDefaults;
 
 #pragma mark - UITableViewDataSource
 
+// Section layout:
+//   0: Ad Block toggle           (always shown)
+//   1: Proxy + custom proxy      (only when ad block is on)
+//   2: Emotes toggle             (always shown)
+//   3: empty / version footer    (always shown — last section)
+// When ad block is OFF, section 1 collapses to 0 rows so the visual flow is
+// AdBlock → Emotes → version. With ad block ON the user sees the full set.
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return self.adblockEnabled ? 3 : 1;
+    return 4;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case 0: return 1;
-        case 1: return self.proxyEnabled ? (self.customProxyEnabled ? 3 : 2) : 1;
-        case 2: return 0;
+        case 1:
+            if (!self.adblockEnabled) return 0;
+            return self.proxyEnabled ? (self.customProxyEnabled ? 3 : 2) : 1;
+        case 2: return 1;
+        case 3: return 0;
         default: return 0;
     }
 }
@@ -82,6 +94,11 @@ extern NSUserDefaults *tweakDefaults;
                 default: break;
             }
             break;
+        case 2:
+            return [self switchCellWithTitle:LOC(@"settings.emotes.title", @"3rd-Party Emotes")
+                                         on:_emotesEnabled
+                                     action:@selector(emotesSwitchChanged:)
+                                 identifier:@"EmotesSwitch"];
         default: break;
     }
     return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
@@ -142,7 +159,7 @@ extern NSUserDefaults *tweakDefaults;
 #pragma mark - UITableViewDelegate (footers)
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
-    if (section == 2) {
+    if (section == 3) {
         UILabel *ver = [[UILabel alloc] init];
         ver.text = @"TwitchAdBlock v" PACKAGE_VERSION;
         ver.textAlignment = NSTextAlignmentCenter;
@@ -163,9 +180,13 @@ extern NSUserDefaults *tweakDefaults;
     NSString *text = nil;
     if (section == 0)
         text = LOC(@"settings.adblock.footer", @"Choose whether or not you want to block ads");
-    else if (section == 1)
+    else if (section == 1) {
+        if (!self.adblockEnabled) return nil;
         text = LOC(@"settings.proxy.footer",
                    @"Proxy specific requests through a proxy server based in an ad-free country");
+    } else if (section == 2)
+        text = LOC(@"settings.emotes.footer",
+                   @"Render 7TV, BetterTTV, and FrankerFaceZ emotes inline in chat");
     else
         return nil;
 
@@ -195,11 +216,15 @@ extern NSUserDefaults *tweakDefaults;
 - (void)adblockSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:@"TWAdBlockEnabled"];
     self.adblockEnabled = sw.on;
-    NSIndexSet *sections = [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(1, 2)];
-    if (sw.on)
-        [self.tableView insertSections:sections withRowAnimation:UITableViewRowAnimationFade];
-    else
-        [self.tableView deleteSections:sections withRowAnimation:UITableViewRowAnimationFade];
+    // Section 1 holds the proxy rows — its visibility tracks the ad-block toggle.
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
+                  withRowAnimation:UITableViewRowAnimationFade];
+    [tweakDefaults synchronize];
+}
+
+- (void)emotesSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:@"TWEmotesEnabled"];
+    self.emotesEnabled = sw.on;
     [tweakDefaults synchronize];
 }
 
