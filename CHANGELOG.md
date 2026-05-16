@@ -4,6 +4,116 @@ All notable changes from the original [level3tjg/TwitchAdBlock](https://github.c
 
 ---
 
+## [Fork] — 2026-05-16
+
+### Added — Launch screen picker (Home / Browse sub-tab support)
+
+New "Launch Screen" dropdown in the TwitchMods settings, replacing the previous flat row list. Tapping the row opens an action sheet with eight options:
+
+- Default (use Twitch's own initial tab)
+- Home → Following, Home → Live, Home → Clips
+- Browse → Categories, Browse → Live Channels
+- Activity, Profile
+
+The chosen tab is applied on launch via a hook on `Twitch.TabBarController.viewDidAppear:` (`dispatch_once` so subsequent appearances don't override manual user navigation). Home sub-tabs are driven by setting the `PagedContainerScrollView.contentOffset` directly on `Twitch.DiscoveryFeedTabViewController.viewDidLayoutSubviews` — `selectViewControllerAtIndex:` on the inherited `Twitch.PagedContainerViewController` updates internal state but doesn't scroll the visible page, so we drive the scroll view ourselves and write the `selectedContentViewControllerIndex` ivar for state consistency. Browse sub-tab works via the public `Twitch.BrowseViewController.selectViewControllerAtIndex:animated:` which behaves normally. Retries on subsequent layout passes (capped) handle late-arriving scroll-view size.
+
+### Added — Hide Twitch Stories toggle
+
+Optional removal of the horizontal Stories strip at the top of the Home tab. Toggle is in TwitchMods settings, key `TWHideStories`. When on, `Twitch.DiscoveryFeedShelfContainerViewController.viewDidLayoutSubviews` walks its child view controllers and subview tree for any view whose class name contains `StoryViewerListCollapsibleView` (the SwiftUI `_UIHostingView` generic instantiation), removes the host from its parent, and adds a required `heightAnchor == 0` constraint on the host's superview so the empty slot collapses. Retries on each layout pass plus delayed sweeps at 0.5/1.5/3/5 seconds handle the host's lazy attachment. Toggling off requires an app relaunch.
+
+### Added — Default proxy reachability indicator in settings
+
+New row under the proxy switches: "Default proxy" / "Custom proxy" with live status (`● Online` / `● Offline` / `Checking…`). Status is determined by a raw TCP `connect()` to the proxy host:port with a 10-second timeout — no auth handshake, no TLS, no upstream test, just whether the port accepts connections. Probe runs on settings open, on the proxy switch toggling on, on the custom-proxy switch flipping, and on the address field losing focus.
+
+### Added — Bits / brand-offer banner blocking
+
+New GraphQL `__typename` blocklist entries with two strip semantics (`twab_arrayAdTypenames` for array elements & edge nodes, `twab_fieldAdTypenames` for top-level dict fields):
+
+- `OfferPromotion` — McDonalds-style brand offer banners
+- `PromotionDisplay` — wrapper around the above
+- `BitsProductPromotion` — the in-app "buy Bits" prompt
+- `FeedAd` — Following-feed ad cards (array-only, would break legitimate metadata fields on Stream/Clip if treated as field-strippable)
+
+Strip is now also edge-aware: removes the whole edge from `feedItems.edges` when `edge.node.__typename` matches, matching the original `filteredArrayUsingPredicate:` semantics. Previously the recursive strip removed only the `node` key from the edge, leaving orphaned edges that broke the Live / Clips renderers.
+
+### Added — Recursive ad-typename diagnostic scan
+
+Every `gql.twitch.tv/gql` response is recursively scanned for any `__typename` containing `Ad` / `Promot` / `Sponsor` / `Headliner`. Each unique `(operationName, typename)` pair is logged once via `[TWAB-Ad] suspect typename=… op=… filtered=N`, surfacing new ad surfaces (e.g., banners introduced in future Twitch versions) so they can be added to the blocklist without code archaeology.
+
+### Added — Subdomain-aware ad host matching
+
+`twab_isAdHost` now splits into an `exact` set and a `suffixes` array. Suffix matches block the bare domain plus any subdomain (`aax-eu.amazon-adsystem.com`, `c.amazon-adsystem.com`, etc.) under one entry. Previously only the exact hosts in the original list were blocked.
+
+### Added — User-facing rebrand to "TwitchMods"
+
+Three display strings updated: the entry row label in Twitch's account menu, the settings screen title, and the version footer. Internal symbols (file/class names, NSUserDefaults keys, dylib filename, repo name) keep the `TwitchAdBlock` naming to preserve existing user preferences and not break the inject toolchain.
+
+### Added — Default-proxy obfuscation
+
+The bundled default proxy address moved out of plaintext in `Config.h`. Stored as XOR-encoded bytes (key `0xA5`) in `SettingsKeys.m` and decoded lazily on first `PROXY_ADDR` access via `twab_defaultProxyAddress()`. Keeps the host/credentials out of GitHub code search and out of `strings` on the built dylib. (XOR is obfuscation, not encryption — anyone reading the source can recover it.)
+
+### Added — Ad-block proxy on by default
+
+`TWAdBlockProxyEnabled` now defaults to `YES` for fresh installs. Existing installs keep their stored preference.
+
+### Added — Typed settings keys
+
+New `SettingsKeys.h` / `.m` exposing `extern NSString *const TWABKey...` constants for every `NSUserDefaults` key, replacing scattered `@"..."` literals across `Tweak.x`, `Settings.x`, `TWABSettingsVC.m`, `Emotes.x`, and `TWAdBlockAssetResourceLoaderDelegate.m`. Typos become compile errors instead of silent NO/nil reads.
+
+### Added — Hook-target missing diagnostic
+
+`twab_warnIfClassMissing()` runs at `%ctor` for every Swift class we `%hook` (account menu, following VC, headliner ad manager, URL-session client, app update prompt, tab bar controller, browse VC, discovery feed tab VC, discovery feed shelf container). When Twitch renames a class between versions the corresponding feature silently fails — this surfaces missing classes via `[TWAB] missing hook target: …` at launch.
+
+### Changed — IRC emote position math is now grapheme-cluster counted
+
+`emotes=` tag positions are derived from `enumerateSubstringsInRange:options:NSStringEnumerationByComposedCharacterSequences` instead of `NSString.length` (UTF-16 code units). Emoji and other non-BMP characters before an emote no longer shift the rendered emote range.
+
+### Changed — WebSocket handler idempotent + non-IRC early return
+
+`twab_wrapHandler` now uses `objc_setAssociatedObject` to mark already-wrapped handlers so the public `NSURLSessionWebSocketTask` and the private `__NSURLSessionWebSocketTask` hooks can't double-wrap each other's blocks. Also short-circuits when the first character of a frame isn't `@`, `:`, or `P` (non-IRC traffic) before doing any CRLF splitting / per-line work.
+
+### Changed — Emote registry LRU eviction
+
+The byWord / byFakeId dictionaries grew monotonically with each visited channel. Now each emote is tagged with its source room; the loaded-room set is bounded to `TWAB_MAX_ROOMS` (50, globals exempt); when crossed, the oldest room's entries are removed from all indices.
+
+### Changed — Synthetic emote ID generator
+
+Switched from a `dispatch_queue_t` + `dispatch_sync` block to a single `atomic_fetch_add` on a `_Atomic uint64_t` counter. One less queue hop per emote registration.
+
+### Changed — `%@` + `UTF8String` → `%{public}@` for NSString logging
+
+Every `os_log` site in `Emotes.x` that was formatting an `NSString` via `%{public}s` + `.UTF8String` now uses `%{public}@` directly. Avoids the per-call UTF-8 conversion and is the idiomatic OSLog form.
+
+### Changed — NSURLSession ad-data filter hooks deduped
+
+`_TtC9TwitchKit18TKURLSessionClient.URLSession:dataTask:didReceiveData:` and `_TtC6Apollo16URLSessionClient.URLSession:dataTask:didReceiveData:` previously had identical one-line bodies. Factored into `twab_filteredFeedData()` so future client class additions only need a one-line hook block.
+
+### Changed — Effective proxy address helper
+
+The `[tweakDefaults boolForKey:TWABKeyAdBlockCustomProxyEnabled] ? [tweakDefaults stringForKey:TWABKeyAdBlockProxy] : PROXY_ADDR` ternary was duplicated 5 times across Tweak.x and TWAdBlockAssetResourceLoaderDelegate.m. Extracted to `twab_effectiveProxyAddress()` in `SettingsKeys.m`.
+
+### Changed — Settings text fields save on every keystroke
+
+The proxy address `UITextField` previously persisted to `NSUserDefaults` only in `textFieldDidEndEditing:`. If the user typed and backgrounded the app without explicitly dismissing the keyboard, the value sometimes wasn't saved. Added an `UIControlEventEditingChanged` target that writes on every change, plus `keyboardDismissMode = OnDrag` so any table scroll dismisses the keyboard (and triggers status re-probe).
+
+### Changed — Settings cells use `dequeueReusableCellWithIdentifier:`
+
+Switch cells now properly dequeue and reset state on reuse instead of allocating fresh `UITableViewCell` instances each `cellForRowAtIndexPath:`. The proxy address text-field cell uses a tagged-view lookup so its `UITextField` isn't reattached on reuse.
+
+### Changed — Deprecated `[tweakDefaults synchronize]` calls removed
+
+Apple deprecated `synchronize` in iOS 12; `setBool:forKey:` and friends already persist on their own. Five call sites in `TWABSettingsVC.m` deleted.
+
+### Fixed — Live and Clips tabs failed to populate
+
+A recursive `__typename` strip introduced in the previous release was removing the `node` key from edges in `feedItems.edges` (matching `FeedAd`), leaving the edges in place with no `node` — the Live/Clips renderers handled this by showing nothing. Restored the original `filteredArrayUsingPredicate:` behavior by detecting edge-shape array elements (`{__typename: Edge, node: {__typename: FeedAd}}`) and removing the whole edge. Also added a "dirty" flag so responses with no strips are returned byte-for-byte unchanged, since Apollo's cache normalization is sensitive to re-serialization differences.
+
+### Fixed — Speculative ad typenames blanking content surfaces
+
+`AdProperties`, `PromotedContent`, `SponsoredContent`, `HeadlinerAd`, `DisplayAd`, `BannerAd`, `FeedAds`, `AdCard` removed from the blocklist — they were defensive guesses never confirmed via diagnostic logs, and several were appearing as metadata fields on legitimate `Stream` / `Clip` / promotional content objects whose renderers expected them. The blocklist is now curated to typenames the user has observed in chat or feed logs.
+
+---
+
 ## [Fork] — 2026-05-15
 
 ### Added — Third-party emote rendering (7TV / BTTV / FrankerFaceZ)

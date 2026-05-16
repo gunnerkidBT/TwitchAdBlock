@@ -14,20 +14,23 @@
 //
 //   3. Per-channel emote loading: when we first see a ROOMSTATE or PRIVMSG
 //      with a new `room-id=`, kick off async fetches against the 7TV, BTTV,
-//      and FFZ public APIs. Globals are loaded once at startup.
+//      and FFZ public APIs. Globals are loaded once at startup. Per-channel
+//      sets are tracked in an LRU (capped at TWAB_MAX_ROOMS); when a room
+//      is evicted, its first-write-wins emote entries are removed too.
+//      Globals (TWAB_GLOBAL_ROOM) are never evicted.
 //
 // Known limitations:
-//   • Animated emotes render as a static first frame. Twitch picks UIImage
-//     vs FLAnimatedImage from MessageStringImageData.isAnimated, but the
-//     rendering pipeline does not call initWithStaticURL:...:isAnimated:
-//     for non-Twitch emotes — verified in a previous session. The hook
-//     target for forcing animation is not yet identified.
+//   • Animated emotes render as a static first frame. Animation in this
+//     Twitch build is server-gated for the account; no client-side hook
+//     reaches the decision (verified via extensive ObjC swizzle attempts).
 //   • Local-user outgoing messages are tokenized locally and bypass the IRC
 //     echo, so your own emotes only render for OTHER viewers.
 
 #import <Foundation/Foundation.h>
 #import <os/log.h>
 #import <objc/runtime.h>
+#import <stdatomic.h>
+#import "SettingsKeys.h"
 
 extern NSUserDefaults *tweakDefaults;
 
@@ -35,6 +38,9 @@ extern NSUserDefaults *tweakDefaults;
 //
 // Synthetic numeric IDs in [9_000_000_000, 9_999_999_999]. Real Twitch IDs are
 // always < 10 digits (~hundreds of millions) so no collision risk.
+
+static NSString *const TWAB_GLOBAL_ROOM = @"__global__";
+static const NSUInteger TWAB_MAX_ROOMS = 50;
 
 static dispatch_queue_t twab_emoteQueue(void) {
     static dispatch_queue_t q;
@@ -67,34 +73,80 @@ static NSMutableSet<NSString *> *twab_loadedRooms(void) {
     return s;
 }
 
+// LRU order of room IDs (oldest at index 0). Mutated only under the emote
+// queue's barrier.
+static NSMutableArray<NSString *> *twab_lruRooms(void) {
+    static NSMutableArray *a;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ a = [NSMutableArray array]; });
+    return a;
+}
+
+// room -> set of fakeIds registered against that room. Used by eviction to
+// reverse-look up which entries to drop.
+static NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *twab_roomFakeIds(void) {
+    static NSMutableDictionary *m;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ m = [NSMutableDictionary dictionary]; });
+    return m;
+}
+
 // Monotonically increasing synthetic ID generator. Starts at 9_000_000_000 so
 // it never collides with real Twitch numeric IDs (which top out around
 // 3 billion as of 2025) or with v2 ids (which contain underscores).
 static uint64_t twab_nextSyntheticId(void) {
-    static uint64_t counter = 9000000000;
-    static dispatch_queue_t serialQ;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        serialQ = dispatch_queue_create("com.level3tjg.twitchadblock.idgen",
-                                        DISPATCH_QUEUE_SERIAL);
-    });
-    __block uint64_t result;
-    dispatch_sync(serialQ, ^{ result = counter++; });
-    return result;
+    static _Atomic uint64_t counter = 9000000000;
+    return atomic_fetch_add(&counter, 1);
 }
 
-// Register an emote word -> (provider, realId). Allocates a synthetic id and
-// updates both maps atomically. First write wins per word.
-static void twab_registerEmote(NSString *word, NSString *provider, NSString *realId) {
+// Register an emote word -> (provider, realId, room). Allocates a synthetic
+// id and updates all indexes atomically. First write wins per word; later
+// writes with the same word are silently dropped, even from a different
+// room. `room` of nil means "global" — never evicted.
+static void twab_registerEmote(NSString *word, NSString *provider,
+                               NSString *realId, NSString *room) {
     if (!word.length || !provider.length || !realId.length) return;
+    NSString *roomKey = room.length ? room : TWAB_GLOBAL_ROOM;
     dispatch_barrier_async(twab_emoteQueue(), ^{
         if (twab_byWord()[word]) return;
         NSString *fakeId = [NSString stringWithFormat:@"%llu", twab_nextSyntheticId()];
         twab_byWord()[word] = @{@"provider": provider,
                                 @"id": realId,
                                 @"fake": fakeId};
-        twab_byFakeId()[fakeId] = @{@"provider": provider, @"id": realId};
+        twab_byFakeId()[fakeId] = @{@"provider": provider,
+                                    @"id": realId,
+                                    @"word": word,
+                                    @"room": roomKey};
+        NSMutableSet *set = twab_roomFakeIds()[roomKey];
+        if (!set) {
+            set = [NSMutableSet set];
+            twab_roomFakeIds()[roomKey] = set;
+        }
+        [set addObject:fakeId];
     });
+}
+
+// Drop the oldest room beyond TWAB_MAX_ROOMS. Caller must already hold the
+// emote queue's barrier. Globals (TWAB_GLOBAL_ROOM) are not in the LRU
+// array, so they're never considered for eviction.
+static void twab_evictOldestRoomsLocked(void) {
+    NSMutableArray *lru = twab_lruRooms();
+    while (lru.count > TWAB_MAX_ROOMS) {
+        NSString *evicted = lru.firstObject;
+        [lru removeObjectAtIndex:0];
+        [twab_loadedRooms() removeObject:evicted];
+        NSSet *fakeIds = [twab_roomFakeIds()[evicted] copy];
+        for (NSString *fakeId in fakeIds) {
+            NSDictionary *entry = twab_byFakeId()[fakeId];
+            NSString *word = entry[@"word"];
+            if (word) [twab_byWord() removeObjectForKey:word];
+            [twab_byFakeId() removeObjectForKey:fakeId];
+        }
+        [twab_roomFakeIds() removeObjectForKey:evicted];
+        os_log(OS_LOG_DEFAULT,
+               "[TWAB-Emote] evicted room=%{public}@ emotes=%lu",
+               evicted, (unsigned long)fakeIds.count);
+    }
 }
 
 static NSString *twab_fakeIdForWord(NSString *word) {
@@ -116,22 +168,37 @@ static NSDictionary *twab_entryForFakeId(NSString *fakeId) {
 
 // ─── Emote loaders ──────────────────────────────────────────────────────────
 
-static void twab_load7TVSet(NSString *url) {
-    NSURLSession *sess = NSURLSession.sharedSession;
-    [[sess dataTaskWithURL:[NSURL URLWithString:url]
-         completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-        if (!d || e) return;
-        NSDictionary *j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
-        NSDictionary *set = j[@"emote_set"] ?: j;  // /users/twitch wraps in emote_set
-        NSArray *emotes = set[@"emotes"];
+// Loader helpers are deliberately defensive — third-party JSON shapes can
+// drift without notice. Every container access is type-guarded so a
+// surprise null/array/string at any level fails the request rather than
+// crashing the chat thread.
+
+static void twab_load7TVSet(NSString *url, NSString *room) {
+    [[NSURLSession.sharedSession dataTaskWithURL:[NSURL URLWithString:url]
+                              completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        if (e || !d) {
+            os_log_error(OS_LOG_DEFAULT, "[TWAB-Emote] 7TV fetch failed url=%{public}@ err=%{public}@",
+                         url, e.localizedDescription);
+            return;
+        }
+        id j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+        if (![j isKindOfClass:NSDictionary.class]) return;
+        id set = j[@"emote_set"];  // /users/twitch wraps in emote_set
+        if (![set isKindOfClass:NSDictionary.class]) set = j;
+        id emotes = set[@"emotes"];
+        if (![emotes isKindOfClass:NSArray.class]) return;
         NSUInteger n = 0;
-        for (NSDictionary *em in emotes) {
+        for (id em in emotes) {
+            if (![em isKindOfClass:NSDictionary.class]) continue;
             NSString *name = em[@"name"];
             NSString *eid = em[@"id"];
-            if (name.length && eid.length) { twab_registerEmote(name, @"7tv", eid); n++; }
+            if ([name isKindOfClass:NSString.class] && name.length &&
+                [eid isKindOfClass:NSString.class] && eid.length) {
+                twab_registerEmote(name, @"7tv", eid, room);
+                n++;
+            }
         }
-        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] 7TV +%lu %{public}s",
-               (unsigned long)n, url.UTF8String);
+        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] 7TV +%lu %{public}@", (unsigned long)n, url);
     }] resume];
 }
 
@@ -141,18 +208,30 @@ static void twab_loadBTTVChannel(NSString *roomId) {
         @"https://api.betterttv.net/3/cached/users/twitch/%@", roomId]];
     [[NSURLSession.sharedSession dataTaskWithURL:url
                               completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-        if (!d || e) return;
-        NSDictionary *j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+        if (e || !d) {
+            os_log_error(OS_LOG_DEFAULT, "[TWAB-Emote] BTTV channel fetch failed room=%{public}@ err=%{public}@",
+                         roomId, e.localizedDescription);
+            return;
+        }
+        id j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+        if (![j isKindOfClass:NSDictionary.class]) return;
         NSUInteger n = 0;
         for (NSString *key in @[ @"channelEmotes", @"sharedEmotes" ]) {
-            for (NSDictionary *em in j[key]) {
+            id arr = j[key];
+            if (![arr isKindOfClass:NSArray.class]) continue;
+            for (id em in arr) {
+                if (![em isKindOfClass:NSDictionary.class]) continue;
                 NSString *code = em[@"code"];
                 NSString *eid = em[@"id"];
-                if (code.length && eid.length) { twab_registerEmote(code, @"bttv", eid); n++; }
+                if ([code isKindOfClass:NSString.class] && code.length &&
+                    [eid isKindOfClass:NSString.class] && eid.length) {
+                    twab_registerEmote(code, @"bttv", eid, roomId);
+                    n++;
+                }
             }
         }
-        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] BTTV channel +%lu room=%{public}s",
-               (unsigned long)n, roomId.UTF8String);
+        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] BTTV channel +%lu room=%{public}@",
+               (unsigned long)n, roomId);
     }] resume];
 }
 
@@ -160,60 +239,88 @@ static void twab_loadBTTVGlobal(void) {
     NSURL *url = [NSURL URLWithString:@"https://api.betterttv.net/3/cached/emotes/global"];
     [[NSURLSession.sharedSession dataTaskWithURL:url
                               completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-        if (!d || e) return;
-        NSArray *list = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+        if (e || !d) {
+            os_log_error(OS_LOG_DEFAULT, "[TWAB-Emote] BTTV global fetch failed err=%{public}@",
+                         e.localizedDescription);
+            return;
+        }
+        id list = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+        if (![list isKindOfClass:NSArray.class]) return;
         NSUInteger n = 0;
-        for (NSDictionary *em in list) {
+        for (id em in list) {
+            if (![em isKindOfClass:NSDictionary.class]) continue;
             NSString *code = em[@"code"];
             NSString *eid = em[@"id"];
-            if (code.length && eid.length) { twab_registerEmote(code, @"bttv", eid); n++; }
+            if ([code isKindOfClass:NSString.class] && code.length &&
+                [eid isKindOfClass:NSString.class] && eid.length) {
+                twab_registerEmote(code, @"bttv", eid, nil);
+                n++;
+            }
         }
         os_log(OS_LOG_DEFAULT, "[TWAB-Emote] BTTV global +%lu", (unsigned long)n);
     }] resume];
 }
 
-static void twab_loadFFZSet(NSString *url) {
+static void twab_loadFFZSet(NSString *url, NSString *room) {
     [[NSURLSession.sharedSession dataTaskWithURL:[NSURL URLWithString:url]
                               completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-        if (!d || e) return;
-        NSDictionary *j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
-        NSDictionary *sets = j[@"sets"];
+        if (e || !d) {
+            os_log_error(OS_LOG_DEFAULT, "[TWAB-Emote] FFZ fetch failed url=%{public}@ err=%{public}@",
+                         url, e.localizedDescription);
+            return;
+        }
+        id j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+        if (![j isKindOfClass:NSDictionary.class]) return;
+        id sets = j[@"sets"];
+        if (![sets isKindOfClass:NSDictionary.class]) return;
         NSUInteger n = 0;
         for (NSString *setKey in sets) {
-            for (NSDictionary *em in sets[setKey][@"emoticons"]) {
+            id setVal = sets[setKey];
+            if (![setVal isKindOfClass:NSDictionary.class]) continue;
+            id arr = setVal[@"emoticons"];
+            if (![arr isKindOfClass:NSArray.class]) continue;
+            for (id em in arr) {
+                if (![em isKindOfClass:NSDictionary.class]) continue;
                 NSString *name = em[@"name"];
                 NSNumber *idNum = em[@"id"];
-                if (name.length && idNum) {
-                    twab_registerEmote(name, @"ffz", idNum.stringValue);
+                if ([name isKindOfClass:NSString.class] && name.length &&
+                    [idNum isKindOfClass:NSNumber.class]) {
+                    twab_registerEmote(name, @"ffz", idNum.stringValue, room);
                     n++;
                 }
             }
         }
-        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] FFZ +%lu %{public}s",
-               (unsigned long)n, url.UTF8String);
+        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] FFZ +%lu %{public}@", (unsigned long)n, url);
     }] resume];
 }
 
 // Fetch global emote sets — called once at startup.
 static void twab_loadGlobalEmotes(void) {
-    twab_load7TVSet(@"https://7tv.io/v3/emote-sets/global");
+    twab_load7TVSet(@"https://7tv.io/v3/emote-sets/global", nil);
     twab_loadBTTVGlobal();
-    twab_loadFFZSet(@"https://api.frankerfacez.com/v1/set/global");
+    twab_loadFFZSet(@"https://api.frankerfacez.com/v1/set/global", nil);
 }
 
 // Fetch channel-specific emote sets for a given Twitch room id. Fully async —
-// never blocks the WebSocket thread, even on the seen-room check.
+// never blocks the WebSocket thread, even on the seen-room check. Touches
+// the LRU and may evict the oldest channel(s) past the cap.
 static void twab_loadChannelEmotes(NSString *roomId) {
     if (!roomId.length) return;
     NSString *room = [roomId copy];
     dispatch_barrier_async(twab_emoteQueue(), ^{
-        if ([twab_loadedRooms() containsObject:room]) return;
+        NSMutableArray *lru = twab_lruRooms();
+        if ([twab_loadedRooms() containsObject:room]) {
+            [lru removeObject:room];
+            [lru addObject:room];
+            return;
+        }
         [twab_loadedRooms() addObject:room];
-        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] loading channel room=%{public}s",
-               room.UTF8String);
-        twab_load7TVSet([NSString stringWithFormat:@"https://7tv.io/v3/users/twitch/%@", room]);
+        [lru addObject:room];
+        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] loading channel room=%{public}@", room);
+        twab_load7TVSet([NSString stringWithFormat:@"https://7tv.io/v3/users/twitch/%@", room], room);
         twab_loadBTTVChannel(room);
-        twab_loadFFZSet([NSString stringWithFormat:@"https://api.frankerfacez.com/v1/room/id/%@", room]);
+        twab_loadFFZSet([NSString stringWithFormat:@"https://api.frankerfacez.com/v1/room/id/%@", room], room);
+        twab_evictOldestRoomsLocked();
     });
 }
 
@@ -233,7 +340,6 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
     // 7TV's CDN doesn't pre-generate .gif for every emote — many only have
     // .webp / .avif, so requesting .gif returns 404 and we render blank.
     // .webp is universally available and iOS decodes static WebP natively.
-    // Animation is a separate problem (see file header) so this is no regression.
     if ([provider isEqualToString:@"7tv"])
         return [NSURL URLWithString:[NSString stringWithFormat:
             @"https://cdn.7tv.app/emote/%@/2x.webp", realId]];
@@ -248,7 +354,7 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
 
 %hook __NSURLSessionLocal
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
-    if (![tweakDefaults boolForKey:@"TWEmotesEnabled"]) return %orig;
+    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled]) return %orig;
     NSURL *real = twab_rewriteEmoteURL(request.URL);
     if (real) {
         NSMutableURLRequest *m = [request mutableCopy];
@@ -265,6 +371,7 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
 //   @badges=...;emotes=305288392:0-7;room-id=12345;... :nick!... PRIVMSG #ch :hi PogChamp
 //
 // emotes= value format: emoteId:start-end[,start-end][/emoteId:start-end[...]]
+// Twitch indexes positions in Unicode code points, not UTF-16 units.
 
 // Extract a tag value from the leading "@key=value;key=value;..." section.
 // Returns nil if not found.
@@ -278,6 +385,19 @@ static NSString *twab_extractTag(NSString *tagsPart, NSString *key) {
                                     range:NSMakeRange(start, tagsPart.length - start)];
     NSUInteger end = (semi.location == NSNotFound) ? tagsPart.length : semi.location;
     return [tagsPart substringWithRange:NSMakeRange(start, end - start)];
+}
+
+// Count grapheme clusters over a range. Close enough to Unicode code points
+// for normal chat content (emoji ZWJ sequences differ, but those are rare
+// in chat text and Twitch's parser is grapheme-cluster oriented anyway).
+static NSUInteger twab_charCount(NSString *s, NSRange range) {
+    __block NSUInteger n = 0;
+    [s enumerateSubstringsInRange:range
+                          options:NSStringEnumerationByComposedCharacterSequences
+                       usingBlock:^(NSString *sub, NSRange r, NSRange er, BOOL *stop) {
+        n++;
+    }];
+    return n;
 }
 
 // Observe non-PRIVMSG lines (ROOMSTATE etc.) for room-id so we can preload
@@ -314,18 +434,20 @@ static NSString *twab_injectIRCEmotes(NSString *line) {
     NSString *roomId = twab_extractTag(tagsPart, @"room-id");
     if (roomId.length) twab_loadChannelEmotes(roomId);
 
-    // Scan words for matches.
+    // Scan words for matches. Positions are code-point-based, so we track a
+    // grapheme-cluster cursor separately from any UTF-16 indexing.
     NSMutableArray<NSString *> *newEntries = [NSMutableArray array];
     NSArray<NSString *> *words = [text componentsSeparatedByString:@" "];
-    NSUInteger pos = 0;
+    NSUInteger codePos = 0;
     for (NSString *word in words) {
+        NSUInteger wordLen = twab_charCount(word, NSMakeRange(0, word.length));
         NSString *fakeId = twab_fakeIdForWord(word);
-        if (fakeId) {
-            NSUInteger end = pos + word.length - 1;
+        if (fakeId && wordLen > 0) {
+            NSUInteger end = codePos + wordLen - 1;
             [newEntries addObject:[NSString stringWithFormat:@"%@:%lu-%lu",
-                                   fakeId, (unsigned long)pos, (unsigned long)end]];
+                                   fakeId, (unsigned long)codePos, (unsigned long)end]];
         }
-        pos += word.length + 1;
+        codePos += wordLen + 1;  // +1 for the space separator
     }
     if (newEntries.count == 0) return nil;
 
@@ -357,12 +479,20 @@ static NSString *twab_injectIRCEmotes(NSString *line) {
 }
 
 // Wrap the completion handler to rewrite each received text frame.
+//
+// The same WebSocket task can have its `receiveMessageWithCompletionHandler:`
+// reached through either the public class or the private subclass. Without
+// the associated-object marker, we'd double-wrap the handler whenever both
+// hook sites fire for the same call, processing the message twice.
 typedef void (^twab_recvHandler)(NSURLSessionWebSocketMessage *, NSError *);
+
+static char twab_handlerWrappedKey;
 
 static twab_recvHandler twab_wrapHandler(twab_recvHandler h) {
     if (!h) return h;
-    return ^(NSURLSessionWebSocketMessage *msg, NSError *err) {
-        if (![tweakDefaults boolForKey:@"TWEmotesEnabled"]) {
+    if (objc_getAssociatedObject(h, &twab_handlerWrappedKey)) return h;
+    twab_recvHandler wrapped = ^(NSURLSessionWebSocketMessage *msg, NSError *err) {
+        if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled]) {
             h(msg, err);
             return;
         }
@@ -370,7 +500,18 @@ static twab_recvHandler twab_wrapHandler(twab_recvHandler h) {
             h(msg, err);
             return;
         }
-        NSArray<NSString *> *lines = [msg.string componentsSeparatedByString:@"\r\n"];
+        NSString *s = msg.string;
+        // Fast bail for non-IRC frames. Twitch IRC lines always start with
+        // `@` (tagged), `:` (prefixed), or a command word — for the chat
+        // socket that's PING/PONG. Anything else is a different protocol
+        // (e.g., a pubsub or graphql subscription frame) and shouldn't be
+        // split-by-CRLF or scanned for emote tokens.
+        unichar first = s.length ? [s characterAtIndex:0] : 0;
+        if (first != '@' && first != ':' && first != 'P') {
+            h(msg, err);
+            return;
+        }
+        NSArray<NSString *> *lines = [s componentsSeparatedByString:@"\r\n"];
         NSMutableArray<NSString *> *out = [NSMutableArray arrayWithCapacity:lines.count];
         BOOL changed = NO;
         for (NSString *line in lines) {
@@ -386,6 +527,9 @@ static twab_recvHandler twab_wrapHandler(twab_recvHandler h) {
             h(msg, err);
         }
     };
+    objc_setAssociatedObject(wrapped, &twab_handlerWrappedKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return wrapped;
 }
 
 // NSURLSessionWebSocketTask (public) is sometimes the dispatch target; the
@@ -408,8 +552,7 @@ static twab_recvHandler twab_wrapHandler(twab_recvHandler h) {
 %ctor {
     %init;
     if (objc_getClass("__NSURLSessionWebSocketTask")) %init(PrivateWS);
-    // Default the feature ON unless explicitly toggled off.
-    if (![tweakDefaults objectForKey:@"TWEmotesEnabled"])
-        [tweakDefaults setBool:YES forKey:@"TWEmotesEnabled"];
+    if (![tweakDefaults objectForKey:TWABKeyEmotesEnabled])
+        [tweakDefaults setBool:YES forKey:TWABKeyEmotesEnabled];
     twab_loadGlobalEmotes();
 }

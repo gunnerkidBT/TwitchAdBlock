@@ -22,7 +22,7 @@
     UITableViewCell *cell = [[UITableViewCell alloc]
         initWithStyle:UITableViewCellStyleDefault
       reuseIdentifier:@"TwitchAdBlockEntry"];
-    cell.textLabel.text = @"TwitchAdBlock";
+    cell.textLabel.text = @"TwitchMods";
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
   }

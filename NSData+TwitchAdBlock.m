@@ -1,4 +1,152 @@
 #import "NSData+TwitchAdBlock.h"
+#import <os/log.h>
+
+// Known ad-related __typename values, split by how aggressively we can
+// strip them. Two semantics:
+//
+//   arrayAdTypenames — safe to remove from array contexts only (matches
+//     the original feedItems.edges filter behavior). Used for things like
+//     FeedAd where the typename might also appear inside legitimate
+//     objects as a typed metadata field that the renderer expects to
+//     exist (e.g., a Stream or Clip with an ad-context field).
+//
+//   fieldAdTypenames — also safe to remove as dict fields (e.g., the
+//     entire `data.offerPromotion` key gets dropped). Used for top-level
+//     banner/prompt typenames that renderers handle gracefully when nil.
+//     A field-strip subset is more aggressive — only add typenames here
+//     that are CONFIRMED as standalone banners, not as nested metadata.
+static NSSet *twab_arrayAdTypenames(void) {
+    static NSSet *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        s = [NSSet setWithObjects:
+            @"FeedAd",                // Following-feed ad cards
+            @"OfferPromotion",        // brand offers (McDonalds banner etc.)
+            @"PromotionDisplay",      // wrapper around offer promotions
+            @"BitsProductPromotion",  // "buy Bits" prompt
+            nil];
+    });
+    return s;
+}
+
+static NSSet *twab_fieldAdTypenames(void) {
+    static NSSet *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // FeedAd intentionally excluded — Live/Clips streams carry
+        // FeedAd-typed metadata fields and removing them breaks rendering.
+        s = [NSSet setWithObjects:
+            @"OfferPromotion",
+            @"PromotionDisplay",
+            @"BitsProductPromotion",
+            nil];
+    });
+    return s;
+}
+
+// Recursively strip ad nodes from the GraphQL response. Sets *dirty=YES
+// if anything was removed so callers can skip a no-op re-serialize.
+static void twab_logStrip(NSString *typename) {
+    static int count = 0;
+    if (count++ >= 50) return;  // cap so a busy response doesn't flood logs
+    os_log(OS_LOG_DEFAULT, "[TWAB-Strip] removed typename=%{public}@", typename);
+}
+
+static void twab_stripAdNodes(id obj, NSSet *arraySet, NSSet *fieldSet, BOOL *dirty) {
+    if ([obj isKindOfClass:NSMutableDictionary.class]) {
+        NSMutableDictionary *d = obj;
+        NSMutableArray *toRemove = nil;
+        for (NSString *key in d) {
+            id val = d[key];
+            if ([val isKindOfClass:NSDictionary.class]) {
+                NSString *t = ((NSDictionary *)val)[@"__typename"];
+                if ([t isKindOfClass:NSString.class] && [fieldSet containsObject:t]) {
+                    if (!toRemove) toRemove = [NSMutableArray array];
+                    [toRemove addObject:key];
+                    twab_logStrip(t);
+                    continue;
+                }
+            }
+            twab_stripAdNodes(val, arraySet, fieldSet, dirty);
+        }
+        if (toRemove.count > 0) {
+            *dirty = YES;
+            [d removeObjectsForKeys:toRemove];
+        }
+    } else if ([obj isKindOfClass:NSMutableArray.class]) {
+        // For array elements we match two shapes:
+        //   - direct ad: element's own __typename is in arraySet
+        //   - edge-style ad: element has a `node` subfield whose __typename
+        //     is in arraySet (matches the GraphQL Connection { edges { node } }
+        //     pattern; original code used this via filteredArrayUsingPredicate)
+        NSMutableArray *a = obj;
+        NSMutableIndexSet *toRemove = nil;
+        for (NSUInteger i = 0; i < a.count; i++) {
+            id val = a[i];
+            BOOL matched = NO;
+            if ([val isKindOfClass:NSDictionary.class]) {
+                NSDictionary *dval = (NSDictionary *)val;
+                NSString *t = dval[@"__typename"];
+                if ([t isKindOfClass:NSString.class] && [arraySet containsObject:t]) {
+                    twab_logStrip(t);
+                    matched = YES;
+                } else {
+                    id node = dval[@"node"];
+                    if ([node isKindOfClass:NSDictionary.class]) {
+                        NSString *nt = ((NSDictionary *)node)[@"__typename"];
+                        if ([nt isKindOfClass:NSString.class] && [arraySet containsObject:nt]) {
+                            twab_logStrip(nt);
+                            matched = YES;
+                        }
+                    }
+                }
+            }
+            if (matched) {
+                if (!toRemove) toRemove = [NSMutableIndexSet indexSet];
+                [toRemove addIndex:i];
+                continue;
+            }
+            twab_stripAdNodes(val, arraySet, fieldSet, dirty);
+        }
+        if (toRemove) {
+            *dirty = YES;
+            [a removeObjectsAtIndexes:toRemove];
+        }
+    }
+}
+
+// Recursively walk the GraphQL response and log any __typename containing
+// ad/promo/sponsor/headliner keywords that we don't already recognize.
+// One log per (operation, typename) pair so this isn't spammy. Helps
+// discover the typename of new ad surfaces (e.g., the McDonalds banner).
+static void twab_scanForAdTypenames(id obj, NSString *opName) {
+    static NSMutableSet *seen;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ seen = [NSMutableSet set]; });
+
+    if ([obj isKindOfClass:NSDictionary.class]) {
+        NSString *typename = ((NSDictionary *)obj)[@"__typename"];
+        if ([typename isKindOfClass:NSString.class] &&
+            ([typename containsString:@"Ad"] ||
+             [typename containsString:@"Promot"] ||
+             [typename containsString:@"Sponsor"] ||
+             [typename containsString:@"Headliner"])) {
+            BOOL known = [twab_arrayAdTypenames() containsObject:typename];
+            NSString *key = [NSString stringWithFormat:@"%@|%@", opName ?: @"?", typename];
+            @synchronized (seen) {
+                if (![seen containsObject:key]) {
+                    [seen addObject:key];
+                    os_log(OS_LOG_DEFAULT,
+                        "[TWAB-Ad] suspect typename=%{public}@ op=%{public}@ filtered=%d",
+                        typename, opName, known);
+                }
+            }
+        }
+        for (id v in [(NSDictionary *)obj allValues]) twab_scanForAdTypenames(v, opName);
+    } else if ([obj isKindOfClass:NSArray.class]) {
+        for (id v in (NSArray *)obj) twab_scanForAdTypenames(v, opName);
+    }
+}
 
 static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
     NSString *opName = op[@"operationName"];
@@ -71,18 +219,22 @@ static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
                                                error:&error];
     if (!json || error) return self;
 
-    // Filter FeedAd nodes from Following-tab feed responses
+    // Strip ad nodes. Two strip semantics: arraySet matches array elements
+    // (including edge-style {node: {...}}) and is the safe-default; fieldSet
+    // additionally removes the parent's key when a dict field has a
+    // matching typename — used only for confirmed top-level banners.
+    // Skip re-serialize if nothing was removed (Apollo cache normalization
+    // is sensitive to byte-level differences, which broke Clips).
+    NSSet *arraySet = twab_arrayAdTypenames();
+    NSSet *fieldSet = twab_fieldAdTypenames();
+    BOOL dirty = NO;
     NSArray *ops = [json isKindOfClass:NSMutableArray.class] ? json : @[json];
     for (NSMutableDictionary *op in ops) {
         if (![op isKindOfClass:NSMutableDictionary.class]) continue;
-        NSMutableDictionary *feedItems = op[@"data"][@"feedItems"];
-        if (!feedItems) continue;
-        NSArray *edges = feedItems[@"edges"];
-        if (![edges isKindOfClass:NSArray.class]) continue;
-        feedItems[@"edges"] = [edges filteredArrayUsingPredicate:
-            [NSPredicate predicateWithFormat:@"node.__typename != 'FeedAd'"]];
+        twab_scanForAdTypenames(op[@"data"], op[@"operationName"]);
+        twab_stripAdNodes(op[@"data"], arraySet, fieldSet, &dirty);
     }
-
+    if (!dirty) return self;
     NSData *out = [NSJSONSerialization dataWithJSONObject:json options:0 error:&error];
     return (out && !error) ? out : self;
 }
