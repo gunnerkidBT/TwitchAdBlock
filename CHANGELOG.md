@@ -86,10 +86,6 @@ Every `gql.twitch.tv/gql` response is recursively scanned for any `__typename` c
 
 Three display strings updated: the entry row label in Twitch's account menu, the settings screen title, and the version footer. Internal symbols (file/class names, NSUserDefaults keys, dylib filename, repo name) keep the `TwitchAdBlock` naming to preserve existing user preferences and not break the inject toolchain.
 
-### Added — Default-proxy obfuscation
-
-The bundled default proxy address moved out of plaintext in `Config.h`. Stored as XOR-encoded bytes (key `0xA5`) in `SettingsKeys.m` and decoded lazily on first `PROXY_ADDR` access via `twab_defaultProxyAddress()`. Keeps the host/credentials out of GitHub code search and out of `strings` on the built dylib. (XOR is obfuscation, not encryption — anyone reading the source can recover it.)
-
 ### Added — Ad-block proxy on by default
 
 `TWAdBlockProxyEnabled` now defaults to `YES` for fresh installs. Existing installs keep their stored preference.
