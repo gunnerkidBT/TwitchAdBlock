@@ -4,6 +4,34 @@ All notable changes from the original [level3tjg/TwitchAdBlock](https://github.c
 
 ---
 
+## [Fork v0.1.10] — 2026-05-17
+
+### Added — Multi-proxy custom proxy list with reorder + delete UI
+
+The custom proxy field is now a list, not a single text field. Each configured proxy gets its own row with inline editing and `↑` / `↓` buttons to change the fallback order. A `+ Add proxy` row at the bottom appends a new empty entry; swipe a row left to delete it. The list is stored as a newline-joined string in `TWABKeyAdBlockProxy`; legacy single-value entries auto-import as a one-row list. The proxy status indicator below the list probes the first non-empty entry. New footer text spells out the fallback semantics: "Proxies are tried in order. The first to respond 200 to /ping rewrites playlists (V2 / ttv-lol-pro format). Otherwise the first valid proxy tunnels them via HTTP CONNECT."
+
+### Added — VOD ad-block (already supported by infrastructure)
+
+Recorded streams now have preroll ads blocked through the same proxy path as live streams. No new code — the existing `twab_isMasterPlaylistHost` matcher already accepted `usher.ttvnw.net/vod/<id>` paths and `twab_URLWithProxyURL:` already branched on `isVOD` to send to `/vod/<id>` instead of `/playlist/<id>`. Verified end-to-end in v0.1.10.
+
+### Changed — Per-proxy ping cache
+
+The Luminous-V1 verdict cache in [NSURL+TwitchAdBlock.m] is now an `NSMutableDictionary` keyed by `scheme://host:port` instead of a single static slot. Multi-proxy fallback lists no longer thrash a single cache slot and re-ping every proxy on every master playlist request — each proxy's verdict is now cached independently.
+
+### Changed — Single-pass GraphQL ad-walk
+
+The previous two-pass tree walk in [NSData+TwitchAdBlock.m] (`twab_scanForAdTypenames` then `twab_stripAdNodes`) is merged into one `twab_processTree` traversal that both logs suspect typenames AND strips known-bad nodes. Drops the per-dict `allValues` intermediate-array allocation. Same behavior, roughly half the work on each GraphQL response.
+
+### Changed — CI builds the IPA automatically on `v*` tag pushes
+
+`.github/workflows/build.yml` now treats `git push origin v0.1.10` as a release trigger — full IPA build + draft release happen automatically, no more `workflow_dispatch` with `create_release=true` dance. Branch pushes still build the debs as a smoke test only.
+
+### Not done — UIListContentConfiguration for the TwitchMods account-menu row
+
+Attempted to drop the em-space title-padding hack in favour of a fresh cell with `UIListContentConfiguration`. Setting `contentConfiguration` on a cell inside Twitch's account menu's tableview crashes the settings VC (confirmed twice — Twitch's tableview presumably has a delegate override that doesn't expect arbitrary cells). Reverted to the em-space approach with a code comment documenting the trap so future attempts don't repeat it. Tuned from 3 → 2 em-spaces for better alignment.
+
+---
+
 ## [Fork v0.1.9] — 2026-05-16
 
 ### Fixed — V2 proxy support (ttv-lol-pro–compatible format) + Basic auth injection

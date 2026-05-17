@@ -4,12 +4,11 @@
 #import <os/log.h>
 #import "NSURL+TwitchAdBlock.h"
 
-// Cache the Luminous-V1 verdict per proxy URL so we don't block every
-// playlist fetch on a network round-trip. The verdict is determined the
-// first time twab_URLWithProxyURL: is called for a given proxy host:port
-// and reused for subsequent calls. Cleared when the host:port changes.
-static NSString *twab_lastPingedProxy;
-static BOOL twab_lastPingedIsLuminous;
+// Per-proxy Luminous-V1 verdict cache. Keyed by "scheme://host:port" so
+// multi-proxy fallback lists don't thrash a single cache slot — the old
+// implementation overwrote the slot on every ping and re-pinged every
+// proxy on every master playlist request.
+static NSMutableDictionary<NSString *, NSNumber *> *twab_pingCache;
 static dispatch_semaphore_t twab_pingLock;
 static dispatch_once_t twab_pingLockOnce;
 
@@ -40,7 +39,10 @@ NSString *twab_basicAuthHeader(NSURL *url) {
   BOOL isVOD = [comps[1] isEqualToString:@"vod"];
   NSString *playlistItem = [self.lastPathComponent stringByDeletingPathExtension];
 
-  dispatch_once(&twab_pingLockOnce, ^{ twab_pingLock = dispatch_semaphore_create(1); });
+  dispatch_once(&twab_pingLockOnce, ^{
+    twab_pingLock = dispatch_semaphore_create(1);
+    twab_pingCache = [NSMutableDictionary dictionary];
+  });
 
   // Key the cache on scheme://host:port — credentials and path don't affect
   // whether the proxy speaks Luminous V1.
@@ -50,9 +52,10 @@ NSString *twab_basicAuthHeader(NSURL *url) {
                         proxyURL.port ?: @80];
 
   dispatch_semaphore_wait(twab_pingLock, DISPATCH_TIME_FOREVER);
-  BOOL haveVerdict = [cacheKey isEqualToString:twab_lastPingedProxy];
-  BOOL cachedIsLuminous = twab_lastPingedIsLuminous;
+  NSNumber *cached = twab_pingCache[cacheKey];
   dispatch_semaphore_signal(twab_pingLock);
+  BOOL haveVerdict = (cached != nil);
+  BOOL cachedIsLuminous = cached.boolValue;
 
   BOOL isLuminousV1;
   if (haveVerdict) {
@@ -86,8 +89,7 @@ NSString *twab_basicAuthHeader(NSURL *url) {
         cacheKey, (long)statusCode, errDesc ?: @"(none)", isLuminousV1, elapsed);
 
     dispatch_semaphore_wait(twab_pingLock, DISPATCH_TIME_FOREVER);
-    twab_lastPingedProxy = [cacheKey copy];
-    twab_lastPingedIsLuminous = isLuminousV1;
+    twab_pingCache[cacheKey] = @(isLuminousV1);
     dispatch_semaphore_signal(twab_pingLock);
   }
 
