@@ -64,7 +64,7 @@ python3 inject_ipa.py /path/to/Twitch-decrypted.ipa \
     Twitch-patched.ipa
 ```
 
-> `inject_ipa.py` is located one directory above this repo at `../inject_ipa.py` if you cloned into the same layout used during development. It does three things: copies the dylib into `Payload/Twitch.app/Frameworks/`, injects an `LC_LOAD_DYLIB` load command into the Twitch Mach-O binary, and patches `NSAppTransportSecurity.NSAllowsArbitraryLoads = true` into `Info.plist` so plain-HTTP proxy traffic isn't blocked by iOS ATS.
+> `inject_ipa.py` lives at the repo root. It does three things: copies the dylib into `Payload/Twitch.app/Frameworks/`, injects an `LC_LOAD_DYLIB` load command into the Twitch Mach-O binary, and patches `NSAppTransportSecurity.NSAllowsArbitraryLoads = true` into `Info.plist` so plain-HTTP proxy traffic isn't blocked by iOS ATS.
 
 ### 5. Install
 
