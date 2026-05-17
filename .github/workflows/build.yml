@@ -1,9 +1,12 @@
 name: CI
 
-# IPA build + draft release auto-runs on v* tag pushes (e.g., `git push
-# origin v0.1.10`). Regular branch pushes still build the debs as a
-# smoke test. Manual workflow_dispatch with create_release=true is kept
-# as the escape hatch for one-off ad-hoc releases.
+# IPA build + draft release ONLY runs via manual workflow_dispatch with
+# create_release=true. Branch / tag pushes build the debs as a smoke
+# test. Tag-push auto-builds were attempted in v0.1.10 but reverted —
+# the IPA download step depends on decryptedappstore.com which is
+# unreachable, and there's no alternative download source the action
+# supports. For IPA builds, build locally with `make SIDELOADED=1` +
+# `inject_ipa.py` (see README).
 on:
   push:
   workflow_dispatch:
@@ -37,7 +40,7 @@ jobs:
           echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: Install dependencies
-        if: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ inputs.create_release }}
         run: |
           sudo apt update
           sudo apt install -y build-essential checkinstall git autoconf automake libtool-bin rsync llvm xmlstarlet
@@ -48,7 +51,7 @@ jobs:
           sudo ldconfig
 
       - name: Download IPA (Auto)
-        if: ${{ (inputs.create_release || startsWith(github.ref, 'refs/tags/v')) && !inputs.ipa_url }}
+        if: ${{ inputs.create_release && !inputs.ipa_url }}
         uses: level3tjg/decryptedappstore-action@main
         with:
           appstore_url: "https://apps.apple.com/us/app/twitch-live-streaming/id460177396"
@@ -63,19 +66,19 @@ jobs:
           zip -T "${{ github.workspace }}/App.ipa"
 
       - name: Download STS IPA
-        if: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ inputs.create_release }}
         run: |
           curl -Lo "${{ github.workspace }}/STS.ipa" "https://nextcloud.level3tjg.me/s/b2WcDdDMN3ZXkYf/download/tv.twitch_19.4.ipa"
           zip -T "${{ github.workspace }}/STS.ipa"
 
       - name: Download LTS IPA
-        if: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ inputs.create_release }}
         run: |
           curl -Lo "${{ github.workspace }}/LTS.ipa" "https://nextcloud.level3tjg.me/s/QEyiJD3FK6AfxTA/download/tv.twitch_12.8.1.ipa"
           zip -T "${{ github.workspace }}/LTS.ipa"
 
       - name: Get IPA Info
-        if: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ inputs.create_release }}
         id: ipa_info
         run: |
           info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
@@ -90,7 +93,7 @@ jobs:
           cache-dir-sdks: ${{ github.workspace }}/theos/sdks
 
       - name: Checkout theos-jailed
-        if: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ inputs.create_release }}
         uses: actions/checkout@v4
         with:
           repository: level3tjg/theos-jailed
@@ -98,7 +101,7 @@ jobs:
           submodules: recursive
 
       - name: Install theos-jailed
-        if: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ inputs.create_release }}
         run: |
           ./theos-jailed/install
           cd libplist*
@@ -107,16 +110,16 @@ jobs:
       - name: Build rootless deb
         run: make package
         env:
-          FINALPACKAGE: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+          FINALPACKAGE: ${{ inputs.create_release }}
           THEOS_PACKAGE_SCHEME: rootless
 
       - name: Build rootful deb
         run: make clean package
         env:
-          FINALPACKAGE: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+          FINALPACKAGE: ${{ inputs.create_release }}
 
       - name: Build IPA
-        if: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ inputs.create_release }}
         run: make package
         env:
           FINALPACKAGE: 1
@@ -125,7 +128,7 @@ jobs:
           APP_VERSION: ${{ steps.ipa_info.outputs.version }}
 
       - name: Build STS IPA
-        if: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ inputs.create_release }}
         run: make package
         env:
           FINALPACKAGE: 1
@@ -135,7 +138,7 @@ jobs:
           STS: 1
 
       - name: Build LTS IPA
-        if: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ inputs.create_release }}
         run: make package
         env:
           FINALPACKAGE: 1
@@ -151,7 +154,7 @@ jobs:
           path: packages/*
 
       - name: Create release
-        if: ${{ inputs.create_release || startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ inputs.create_release }}
         uses: softprops/action-gh-release@v2
         with:
           draft: true
