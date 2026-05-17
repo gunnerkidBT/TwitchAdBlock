@@ -11,7 +11,8 @@ TWAdBlockAssetResourceLoaderDelegate *assetResourceLoaderDelegate;
 // Ad-domain blocklist — requests to these hosts are failed immediately.
 // `exact` is matched as-is; `suffixes` match the bare domain OR any subdomain
 // (so `amazon-adsystem.com` blocks `aax-eu.amazon-adsystem.com` etc.).
-static BOOL twab_isAdHost(NSString *host) {
+// Non-static so the shared __NSURLSessionLocal hook in Emotes.x reuses it.
+BOOL twab_isAdHost(NSString *host) {
   if (!host.length) return NO;
   static NSSet *exact;
   static NSArray *suffixes;
@@ -32,33 +33,65 @@ static BOOL twab_isAdHost(NSString *host) {
   return NO;
 }
 
-// Playlist hosts to route through proxy.
-static BOOL twab_isPlaylistHost(NSString *host) {
+// Playlist + HLS segment hosts. Non-static so the shared
+// __NSURLSessionLocal hook in Emotes.x can use the same matcher.
+// Twitch 29.4.2 uses regional / cloudfront subdomains beyond the two
+// exact hosts of older builds.
+BOOL twab_isPlaylistHost(NSString *host) {
+  if (!host.length) return NO;
   return [host isEqualToString:@"usher.ttvnw.net"] ||
-         [host isEqualToString:@"playlist.ttvnw.net"];
+         [host isEqualToString:@"playlist.ttvnw.net"] ||
+         [host hasSuffix:@".playlist.ttvnw.net"] ||   // use22.playlist.ttvnw.net etc.
+         [host hasSuffix:@".hls.ttvnw.net"];          // <id>.j.cloudfront.hls.ttvnw.net etc.
+}
+
+// Stricter: hosts that serve the MASTER playlist (the one Luminous V1
+// proxies know how to rewrite). Variant playlists + segments live on
+// other hosts and must NOT be rewritten — the Luminous protocol can't
+// handle them and the rewritten URL is meaningless to the proxy.
+BOOL twab_isMasterPlaylistHost(NSString *host) {
+  if (!host.length) return NO;
+  return [host isEqualToString:@"usher.ttvnw.net"];
 }
 
 // Server-side video ad blocking
 
 %hook NSURLSession
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
+  // Targeted diagnostic — only video-path hosts. See the same comment in
+  // Emotes.x's __NSURLSessionLocal hook: per-URL logging at Twitch's
+  // request rate overflows the log buffers and we lose the lines that
+  // actually matter ([TWAB-Proxy], rewrite confirmations).
+  NSString *_host = request.URL.host;
+  if (_host && (twab_isPlaylistHost(_host) ||
+                [_host hasSuffix:@"ttvnw.net"])) {
+    os_log(OS_LOG_DEFAULT,
+      "[TWAB-URL] NSURLSession host=%{public}@ path=%{public}@",
+      _host, request.URL.path ?: @"?");
+  }
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) return %orig;
   if (twab_isAdHost(request.URL.host))
     return nil;
   if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
   ((NSMutableURLRequest *)request).HTTPBody = [request.HTTPBody twab_requestDataForRequest:request];
   if (![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled]) return %orig;
-  NSString *proxy = twab_effectiveProxyAddress();
-  if (!twab_isPlaylistHost(request.URL.host)) return %orig;
-  NSURL *proxyURL = [NSURL URLWithString:proxy];
-  if ([proxyURL.scheme hasPrefix:@"http"]) {
+  if (!twab_isMasterPlaylistHost(request.URL.host)) return %orig;
+  // V2 URL rewrite only on this shadowed public hook (video traffic goes
+  // through __NSURLSessionLocal in Emotes.x which has the richer routing
+  // logic including CONNECT fallback + subscriber bypass). Try each
+  // configured proxy until one rewrites successfully.
+  for (NSString *proxyAddr in twab_effectiveProxyAddresses()) {
+    NSURL *proxyURL = twab_normalizedProxyURL(proxyAddr);
+    if (!proxyURL) continue;
     NSURL *rewritten = [request.URL twab_URLWithProxyURL:proxyURL];
     if (![rewritten isEqual:request.URL]) {
       ((NSMutableURLRequest *)request).URL = rewritten;
-      return %orig;
+      NSString *auth = twab_basicAuthHeader(proxyURL);
+      if (auth) [(NSMutableURLRequest *)request setValue:auth forHTTPHeaderField:@"Authorization"];
+      break;
     }
   }
-  return &%orig([self twab_proxySessionWithAddress:proxy], _cmd, request);
+  return %orig;
 }
 - (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request
                                          fromData:(NSData *)bodyData {
@@ -68,31 +101,57 @@ static BOOL twab_isPlaylistHost(NSString *host) {
   if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
   bodyData = [bodyData twab_requestDataForRequest:request];
   if (![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled]) return %orig;
-  NSString *proxy = twab_effectiveProxyAddress();
-  if (!twab_isPlaylistHost(request.URL.host)) return %orig;
-  NSURL *proxyURL = [NSURL URLWithString:proxy];
-  if ([proxyURL.scheme hasPrefix:@"http"]) {
+  if (!twab_isMasterPlaylistHost(request.URL.host)) return %orig;
+  for (NSString *proxyAddr in twab_effectiveProxyAddresses()) {
+    NSURL *proxyURL = twab_normalizedProxyURL(proxyAddr);
+    if (!proxyURL) continue;
     NSURL *rewritten = [request.URL twab_URLWithProxyURL:proxyURL];
     if (![rewritten isEqual:request.URL]) {
       ((NSMutableURLRequest *)request).URL = rewritten;
-      return %orig;
+      NSString *auth = twab_basicAuthHeader(proxyURL);
+      if (auth) [(NSMutableURLRequest *)request setValue:auth forHTTPHeaderField:@"Authorization"];
+      break;
     }
   }
-  return &%orig([self twab_proxySessionWithAddress:proxy], _cmd, request, bodyData);
+  return %orig;
 }
 %end
 
 %hook AVURLAsset
 - (instancetype)initWithURL:(NSURL *)URL options:(NSDictionary<NSString *, id> *)options {
+  // AVURLAsset hits are rare (one per stream-load), so log unconditionally.
+  if (URL.host && ([URL.host hasSuffix:@"ttvnw.net"] || [URL.host hasSuffix:@"twitch.tv"])) {
+    os_log(OS_LOG_DEFAULT,
+      "[TWAB-URL] AVAsset host=%{public}@ scheme=%{public}@ path=%{public}@ playlist=%d",
+      URL.host, URL.scheme ?: @"?", URL.path ?: @"/", twab_isPlaylistHost(URL.host));
+  }
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled] ||
       ![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled] ||
       ![URL.scheme isEqualToString:@"https"] || !twab_isPlaylistHost(URL.host))
     return %orig;
-  NSURL *proxyURL = [NSURL URLWithString:twab_effectiveProxyAddress()];
-  if ([proxyURL.scheme hasPrefix:@"http"]) {
-    NSURL *rewritten = [URL twab_URLWithProxyURL:proxyURL];
-    if (![rewritten isEqual:URL])
-      return %orig(rewritten, options);
+  // Only the master playlist host (usher.ttvnw.net) can be V2-rewritten.
+  // Variant playlists + segments fall through to the AVAssetResourceLoaderDelegate
+  // path below, which proxies them via its own NSURLSession. Try each
+  // configured proxy until one rewrites successfully. AVURLAsset accepts
+  // extra HTTP headers via the undocumented AVURLAssetHTTPHeaderFieldsKey
+  // option — used here to inject Basic auth for proxies that need it.
+  if (twab_isMasterPlaylistHost(URL.host)) {
+    for (NSString *proxyAddr in twab_effectiveProxyAddresses()) {
+      NSURL *proxyURL = twab_normalizedProxyURL(proxyAddr);
+      if (!proxyURL) continue;
+      NSURL *rewritten = [URL twab_URLWithProxyURL:proxyURL];
+      if (![rewritten isEqual:URL]) {
+        NSString *auth = twab_basicAuthHeader(proxyURL);
+        if (auth) {
+          NSMutableDictionary *opts = options.mutableCopy ?: [NSMutableDictionary dictionary];
+          NSMutableDictionary *headers = [opts[@"AVURLAssetHTTPHeaderFieldsKey"] mutableCopy] ?: [NSMutableDictionary dictionary];
+          headers[@"Authorization"] = auth;
+          opts[@"AVURLAssetHTTPHeaderFieldsKey"] = headers;
+          options = opts;
+        }
+        return %orig(rewritten, options);
+      }
+    }
   }
   NSURLComponents *components = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:YES];
   components.scheme = @"twab";

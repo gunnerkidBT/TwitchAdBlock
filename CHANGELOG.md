@@ -4,6 +4,44 @@ All notable changes from the original [level3tjg/TwitchAdBlock](https://github.c
 
 ---
 
+## [Fork v0.1.9] — 2026-05-16
+
+### Fixed — V2 proxy support (ttv-lol-pro–compatible format) + Basic auth injection
+
+Preroll-ad blocking was silently broken for the most common class of proxies: paid HTTP proxies sold as "HTTP/SOCKS" (proxy6.net, etc.) that actually speak the ttv-lol-pro V2 protocol but require Basic authentication. Three root causes, all fixed:
+
+1. **URL format was wrong for V2 servers.** Old rewrite produced `proxy/playlist/<channel>` (Luminous V1 bare-name shape). V2 servers expect `proxy/<type>/<URL-encoded "<channel>.m3u8?<query>">` — the `.m3u8` extension AND the full query string are required, otherwise the V2 server returns 404 and we silently fall through to the (less effective) CONNECT path. Rewrite now builds this format with JavaScript `encodeURIComponent`-equivalent percent encoding (alphanumerics + `-_.~` unreserved).
+
+2. **`token` + `sig` query params now stripped** for live playlists (not VOD) before URL-encoding. The user's auth token shouldn't be exposed to a third-party proxy operator — the proxy fetches a fresh playlist itself, no user creds needed. Privacy fix + ad-evasion: the ad-bearing token stays out of the proxy hop entirely.
+
+3. **NSURLSession does not auto-extract `user:pass` from URLs** the way browsers' XMLHttpRequest does — every `/ping` probe and every rewritten playlist request was hitting the proxy *without* basic auth, returning 407, and being misclassified as "non-V2". New `twab_basicAuthHeader()` helper builds `Authorization: Basic <base64(user:pass)>` from the proxy URL's embedded credentials and injects it on: the `/ping` probe in [NSURL+TwitchAdBlock.m], the rewritten playlist request in [Emotes.x] / [Tweak.x] (set as request header on the NSMutableURLRequest), and the AVURLAsset path in [Tweak.x] via the `AVURLAssetHTTPHeaderFieldsKey` option.
+
+### Added — HTTP CONNECT proxy fallback (non-V2 proxies)
+
+For genuine tunnel-only proxies that don't speak V2 (return non-200 to `/ping` even with Basic auth), the tweak now creates a fresh `NSURLSession` configured with `connectionProxyDictionary` and dispatches the master playlist task there. Subsequent variant/segment requests go direct to Twitch CDN — ad-targeting keys off the master playlist, so once that comes from a clean IP the rest of the stream is fine. The proxy session is strong-associated with the returned task via `objc_setAssociatedObject(OBJC_ASSOCIATION_RETAIN_NONATOMIC)` so it can't be deallocated mid-request (this was the cause of multiple prior crash attempts at session substitution). A TLS-based recursion guard (`NSThread.currentThread.threadDictionary[@"twab_inProxyDispatch"]`) handles the re-entry when `[proxySession dataTaskWithRequest:]` re-fires our `__NSURLSessionLocal` hook.
+
+### Added — Subscriber / Turbo bypass
+
+When the master playlist URL's `token` JSON contains `subscriber: true` or `turbo: true`, the tweak skips proxy routing entirely. Subscribed users already get ad-free playlists from Twitch directly, so proxying just exposes their auth token to a third party with no ad-block benefit. Borrowed from ttv-lol-pro's `isExemptFromAds` check.
+
+### Added — Multi-proxy fallback list
+
+The custom proxy field now accepts a comma- or newline-separated list of proxy addresses. On each master playlist request, the tweak tries each proxy's `/ping` in order — first one that returns 200 wins for the V2 rewrite path; the first parseable address is used for the CONNECT fallback. Lets users configure a primary V2 proxy with a CONNECT proxy as backup.
+
+### Added — Info.plist ATS bypass at IPA injection time
+
+`inject_ipa.py` now patches `NSAppTransportSecurity.NSAllowsArbitraryLoads = true` into the app's `Info.plist` during sideload injection. iOS App Transport Security otherwise blocks all plain-HTTP NSURLSession traffic — without this patch the proxy `/ping` probe fails with `status=-1 (App Transport Security policy requires HTTPS)` and routing never activates. Setting is harmless for the bundled use case (the only plain-HTTP destination is the user's configured proxy).
+
+### Fixed — Master playlist host matcher narrowed
+
+`twab_isMasterPlaylistHost` now matches only `usher.ttvnw.net` (the actual master playlist host) instead of the broad playlist/segment matcher. The V2 protocol can only rewrite master playlist URLs — running it against variant playlists (`*.playlist.ttvnw.net`) or segments (`*.hls.ttvnw.net`) corrupts them into proxy-prefixed nonsense and breaks playback. The broader `twab_isPlaylistHost` matcher remains for future hooks that may legitimately want to match all playlist traffic.
+
+### Changed — Targeted diagnostic logging
+
+Per-URL `[TWAB-URL]` logs now filter to `*.ttvnw.net` hosts only, instead of every NSURL the app fetches. Twitch's request volume was overflowing Console.app / idevicesyslog buffers and dropping the critical `[TWAB-Proxy] ping` / rewrite confirmation lines under load.
+
+---
+
 ## [Fork] — 2026-05-16
 
 ### Added — Launch screen picker (Home / Browse sub-tab support)

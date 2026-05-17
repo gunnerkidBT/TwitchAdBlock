@@ -27,3 +27,23 @@ extern NSString *const TWABKeyHideStories;
 // Preserves the prior call-site semantics exactly (returns whatever
 // stringForKey: returned, including nil/empty, when custom is enabled).
 NSString *twab_effectiveProxyAddress(void);
+
+// Normalizes a proxy address string into an NSURL. Prepends http:// if no
+// scheme is present so addresses like "user:pass@host:port" parse with the
+// expected scheme/host instead of NSURL treating "user" as the scheme.
+// Returns nil if the address can't be parsed into something with a host.
+NSURL *twab_normalizedProxyURL(NSString *address);
+
+// Splits the effective proxy address on commas / newlines / whitespace into
+// an ordered list of proxy addresses to try. Returns an empty array if the
+// configured value has no parseable entries. Order is preserved — callers
+// should ping each in sequence and use the first that responds.
+NSArray<NSString *> *twab_effectiveProxyAddresses(void);
+
+// Returns YES if the Twitch auth token embedded in the URL query string
+// marks the user as subscribed or Turbo. Such users don't see preroll ads
+// anyway, so proxying their requests just exposes their credentials to a
+// third party with no ad-block benefit. The "token" query parameter is a
+// JSON-encoded blob; this parses it leniently and returns NO on any
+// malformed input.
+BOOL twab_userIsAdExempt(NSString *queryString);

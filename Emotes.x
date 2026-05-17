@@ -31,6 +31,15 @@
 #import <objc/runtime.h>
 #import <stdatomic.h>
 #import "SettingsKeys.h"
+#import "NSURL+TwitchAdBlock.h"
+#import "NSData+TwitchAdBlock.h"
+#import "NSURLSession+TwitchAdBlock.h"
+
+// Forward declarations for host matchers defined in Tweak.x — needed by
+// the consolidated __NSURLSessionLocal hook below.
+extern BOOL twab_isAdHost(NSString *host);
+extern BOOL twab_isPlaylistHost(NSString *host);
+extern BOOL twab_isMasterPlaylistHost(NSString *host);
 
 extern NSUserDefaults *tweakDefaults;
 
@@ -352,16 +361,154 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
     return nil;
 }
 
+// The leaf NSURLSession implementation in iOS is __NSURLSessionLocal,
+// which overrides dataTaskWithRequest:. Twitch's video stack ends up
+// calling this concrete class directly, so any %hook on the parent
+// NSURLSession is shadowed for video traffic. Consolidating all our
+// dataTaskWithRequest: logic here:
+//   1. Diagnostic log (TWAB-URL, first 200 calls)
+//   2. Ad-host hard block (TWAdBlockEnabled)
+//   3. GQL platform spoof on request body (TWAdBlockEnabled)
+//   4. 7TV/BTTV/FFZ emote URL redirect (TWEmotesEnabled)
+//   5. Playlist host proxy URL rewrite (TWAdBlockEnabled + TWAdBlockProxyEnabled)
+//
+// Order matters: ad host block → body spoof → emote redirect → proxy route.
+// The proxy route only rewrites the URL (Luminous-style); the
+// session-switch fallback was removed because it crashes Twitch's video
+// stack when the substituted session is foreign to __NSURLSessionLocal.
 %hook __NSURLSessionLocal
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
-    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled]) return %orig;
-    NSURL *real = twab_rewriteEmoteURL(request.URL);
-    if (real) {
-        NSMutableURLRequest *m = [request mutableCopy];
-        m.URL = real;
-        return %orig(m);
+    // Recursion guard: when the proxy-routing fallback below creates a
+    // task on a foreign proxy-configured session, that session's
+    // dataTaskWithRequest: call re-enters this hook. The guard makes the
+    // recursive call return %orig immediately so the proxy session sets
+    // up its task naturally and we don't re-route forever.
+    NSMutableDictionary *_td = [NSThread currentThread].threadDictionary;
+    if ([_td[@"twab_inProxyDispatch"] boolValue]) {
+        return %orig(request);
     }
-    return %orig;
+
+    // Targeted diagnostic only. Logging every URL through this hook
+    // floods the system log past what Console.app / idevicesyslog can
+    // keep up with under Twitch's request rate; the relevant
+    // [TWAB-Proxy] and rewrite lines get dropped. Only log playlist /
+    // segment hosts (and our own proxy host) so the signal is preserved.
+    NSString *_host = request.URL.host;
+    if (_host && (twab_isPlaylistHost(_host) ||
+                  [_host hasSuffix:@"ttvnw.net"])) {
+        os_log(OS_LOG_DEFAULT,
+            "[TWAB-URL] __NSURLSessionLocal host=%{public}@ path=%{public}@",
+            _host, request.URL.path ?: @"?");
+    }
+
+    BOOL adBlockOn = [tweakDefaults boolForKey:TWABKeyAdBlockEnabled];
+    BOOL emotesOn = [tweakDefaults boolForKey:TWABKeyEmotesEnabled];
+
+    if (adBlockOn && twab_isAdHost(request.URL.host)) return nil;
+
+    // GQL platform spoof — twab_requestDataForRequest: no-ops for non-gql hosts.
+    if (adBlockOn) {
+        NSData *body = request.HTTPBody;
+        NSData *xformed = [body twab_requestDataForRequest:request];
+        if (xformed != body) {
+            if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
+            ((NSMutableURLRequest *)request).HTTPBody = xformed;
+        }
+    }
+
+    // Emote URL rewrite (jtvnw.net emoticons -> 7TV/BTTV/FFZ CDNs).
+    if (emotesOn) {
+        NSURL *real = twab_rewriteEmoteURL(request.URL);
+        if (real) {
+            if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
+            ((NSMutableURLRequest *)request).URL = real;
+            return %orig(request);
+        }
+    }
+
+    // Master playlist routing. Two paths:
+    //   1. ttv-lol-pro V2 / Luminous proxies — rewrite URL to
+    //      proxy/<type>/<encoded "channel.m3u8?sanitized-query">.
+    //      Returns clean (ad-free) master playlist; variant URLs go
+    //      direct to Twitch CDN. Tries each configured proxy in order;
+    //      first whose /ping returns 200 wins.
+    //   2. Standard HTTP CONNECT proxies — create a proxy-configured
+    //      NSURLSession via twab_proxySessionWithAddress: and dispatch
+    //      the task there. Proxy tunnels CONNECT to usher.ttvnw.net so
+    //      Twitch's ad-targeting (which keys off client IP) misses.
+    //      Proxy session is strong-associated with the returned task so
+    //      it can't be deallocated mid-request.
+    //
+    // Subscriber/Turbo users bypass both paths — their accounts already
+    // serve ad-free playlists, so proxying just exposes their token.
+    if (twab_isMasterPlaylistHost(request.URL.host)) {
+        BOOL proxyEnabled = [tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled];
+        NSArray<NSString *> *proxyAddrs = twab_effectiveProxyAddresses();
+        os_log(OS_LOG_DEFAULT,
+            "[TWAB-URL] master playlist seen host=%{public}@ adBlock=%d proxyEnabled=%d proxies=%lu",
+            request.URL.host, adBlockOn, proxyEnabled, (unsigned long)proxyAddrs.count);
+
+        if (adBlockOn && proxyEnabled && proxyAddrs.count) {
+            if (twab_userIsAdExempt(request.URL.query)) {
+                os_log(OS_LOG_DEFAULT,
+                    "[TWAB-URL] subscriber/turbo detected — skipping proxy host=%{public}@",
+                    request.URL.host);
+            } else {
+                BOOL rewrote = NO;
+                for (NSString *proxyAddr in proxyAddrs) {
+                    NSURL *proxyURL = twab_normalizedProxyURL(proxyAddr);
+                    if (!proxyURL) continue;
+                    NSURL *rewritten = [request.URL twab_URLWithProxyURL:proxyURL];
+                    if (![rewritten isEqual:request.URL]) {
+                        os_log(OS_LOG_DEFAULT,
+                            "[TWAB-URL] V2-rewrote master playlist via %{public}@:%{public}@",
+                            proxyURL.host, proxyURL.port ?: @0);
+                        if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
+                        ((NSMutableURLRequest *)request).URL = rewritten;
+                        // Inject Basic auth header — NSURLSession ignores
+                        // user:pass embedded in URLs, but the proxy needs
+                        // it to authorize the request.
+                        NSString *auth = twab_basicAuthHeader(proxyURL);
+                        if (auth) [(NSMutableURLRequest *)request setValue:auth forHTTPHeaderField:@"Authorization"];
+                        rewrote = YES;
+                        break;
+                    }
+                }
+
+                if (!rewrote) {
+                    // Standard HTTP CONNECT proxy fallback on the first
+                    // parseable proxy. Cast to NSURLSession because
+                    // __NSURLSessionLocal is only forward-declared here.
+                    NSString *connectAddr = nil;
+                    for (NSString *a in proxyAddrs) {
+                        if (twab_normalizedProxyURL(a)) { connectAddr = a; break; }
+                    }
+                    if (connectAddr) {
+                        NSURLSession *proxySession = [(NSURLSession *)self twab_proxySessionWithAddress:connectAddr];
+                        if (proxySession) {
+                            _td[@"twab_inProxyDispatch"] = @YES;
+                            NSURLSessionDataTask *task = [proxySession dataTaskWithRequest:request];
+                            _td[@"twab_inProxyDispatch"] = nil;
+                            if (task) {
+                                static char proxySessionKey;
+                                objc_setAssociatedObject(task, &proxySessionKey, proxySession,
+                                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                                os_log(OS_LOG_DEFAULT,
+                                    "[TWAB-URL] routed master playlist via HTTP CONNECT proxy host=%{public}@",
+                                    request.URL.host);
+                                return task;
+                            }
+                        }
+                    }
+                    os_log(OS_LOG_DEFAULT,
+                        "[TWAB-URL] master playlist NOT rewritten/routed host=%{public}@",
+                        request.URL.host);
+                }
+            }
+        }
+    }
+
+    return %orig(request);
 }
 %end
 
