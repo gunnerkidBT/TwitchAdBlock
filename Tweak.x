@@ -603,6 +603,7 @@ static void twab_warnIfClassMissing(const char *name) {
   }
 }
 
+
 %ctor {
   rebind_symbols(
       (struct rebinding[]){
@@ -624,6 +625,22 @@ static void twab_warnIfClassMissing(const char *name) {
     [tweakDefaults setBool:YES forKey:TWABKeyAdBlockProxyEnabled];
   if (![tweakDefaults objectForKey:TWABKeyAdBlockCustomProxyEnabled])
     [tweakDefaults setBool:NO forKey:TWABKeyAdBlockCustomProxyEnabled];
+  // Emote default lives here (not in Emotes.x's %ctor) because Logos
+  // doesn't guarantee inter-file %ctor ordering — Emotes.x's %ctor
+  // could run before Tweak.x's, when `tweakDefaults` is still nil, and
+  // `[nil setBool:forKey:]` is a silent no-op. Setting it here, AFTER
+  // tweakDefaults is allocated, is the only safe place.
+  if (![tweakDefaults objectForKey:TWABKeyEmotesEnabled])
+    [tweakDefaults setBool:YES forKey:TWABKeyEmotesEnabled];
+  // One-shot migration: force emotes on for users on installs from
+  // earlier builds where the ctor-ordering bug left the key absent and
+  // boolForKey: returned NO, looking like an explicit user disable.
+  // Runs once per device; user can toggle off afterwards and it sticks.
+  static NSString *const kEmotesMigrationKey = @"TWABMigrated_emotesDefault_v1";
+  if (![tweakDefaults boolForKey:kEmotesMigrationKey]) {
+    [tweakDefaults setBool:YES forKey:TWABKeyEmotesEnabled];
+    [tweakDefaults setBool:YES forKey:kEmotesMigrationKey];
+  }
   assetResourceLoaderDelegate = [[TWAdBlockAssetResourceLoaderDelegate alloc] init];
 
   // Surface silently-skipped %hook blocks. Either of the two URLSession

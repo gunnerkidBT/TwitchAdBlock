@@ -108,12 +108,17 @@ static uint64_t twab_nextSyntheticId(void) {
     return atomic_fetch_add(&counter, 1);
 }
 
-// Register an emote word -> (provider, realId, room). Allocates a synthetic
-// id and updates all indexes atomically. First write wins per word; later
-// writes with the same word are silently dropped, even from a different
-// room. `room` of nil means "global" — never evicted.
+// Register an emote word -> (provider, realId, animated, room). Allocates a
+// synthetic id and updates all indexes atomically. First write wins per
+// word; later writes with the same word are silently dropped, even from
+// a different room. `room` of nil means "global" — never evicted. The
+// `animated` flag drives format selection in twab_rewriteEmoteURL —
+// animated emotes need .gif on 7TV (only GIF carries animation in the
+// renderer); static emotes need .webp (some 7TV emotes lack a GIF
+// variant entirely and .gif would 404).
 static void twab_registerEmote(NSString *word, NSString *provider,
-                               NSString *realId, NSString *room) {
+                               NSString *realId, NSString *room,
+                               BOOL animated) {
     if (!word.length || !provider.length || !realId.length) return;
     NSString *roomKey = room.length ? room : TWAB_GLOBAL_ROOM;
     dispatch_barrier_async(twab_emoteQueue(), ^{
@@ -121,11 +126,13 @@ static void twab_registerEmote(NSString *word, NSString *provider,
         NSString *fakeId = [NSString stringWithFormat:@"%llu", twab_nextSyntheticId()];
         twab_byWord()[word] = @{@"provider": provider,
                                 @"id": realId,
-                                @"fake": fakeId};
+                                @"fake": fakeId,
+                                @"animated": @(animated)};
         twab_byFakeId()[fakeId] = @{@"provider": provider,
                                     @"id": realId,
                                     @"word": word,
-                                    @"room": roomKey};
+                                    @"room": roomKey,
+                                    @"animated": @(animated)};
         NSMutableSet *set = twab_roomFakeIds()[roomKey];
         if (!set) {
             set = [NSMutableSet set];
@@ -201,9 +208,18 @@ static void twab_load7TVSet(NSString *url, NSString *room) {
             if (![em isKindOfClass:NSDictionary.class]) continue;
             NSString *name = em[@"name"];
             NSString *eid = em[@"id"];
+            // animated flag lives at em.data.animated (7TV v3). Falls
+            // back to NO if missing — safer to under-animate than to
+            // request a non-existent .gif and render blank.
+            BOOL animated = NO;
+            id data = em[@"data"];
+            if ([data isKindOfClass:NSDictionary.class]) {
+                id a = ((NSDictionary *)data)[@"animated"];
+                if ([a isKindOfClass:NSNumber.class]) animated = [a boolValue];
+            }
             if ([name isKindOfClass:NSString.class] && name.length &&
                 [eid isKindOfClass:NSString.class] && eid.length) {
-                twab_registerEmote(name, @"7tv", eid, room);
+                twab_registerEmote(name, @"7tv", eid, room, animated);
                 n++;
             }
         }
@@ -232,9 +248,13 @@ static void twab_loadBTTVChannel(NSString *roomId) {
                 if (![em isKindOfClass:NSDictionary.class]) continue;
                 NSString *code = em[@"code"];
                 NSString *eid = em[@"id"];
+                // BTTV: imageType == "gif" → animated; "png" → static.
+                NSString *imgType = em[@"imageType"];
+                BOOL animated = [imgType isKindOfClass:NSString.class] &&
+                                [imgType isEqualToString:@"gif"];
                 if ([code isKindOfClass:NSString.class] && code.length &&
                     [eid isKindOfClass:NSString.class] && eid.length) {
-                    twab_registerEmote(code, @"bttv", eid, roomId);
+                    twab_registerEmote(code, @"bttv", eid, roomId, animated);
                     n++;
                 }
             }
@@ -260,9 +280,12 @@ static void twab_loadBTTVGlobal(void) {
             if (![em isKindOfClass:NSDictionary.class]) continue;
             NSString *code = em[@"code"];
             NSString *eid = em[@"id"];
+            NSString *imgType = em[@"imageType"];
+            BOOL animated = [imgType isKindOfClass:NSString.class] &&
+                            [imgType isEqualToString:@"gif"];
             if ([code isKindOfClass:NSString.class] && code.length &&
                 [eid isKindOfClass:NSString.class] && eid.length) {
-                twab_registerEmote(code, @"bttv", eid, nil);
+                twab_registerEmote(code, @"bttv", eid, nil, animated);
                 n++;
             }
         }
@@ -292,9 +315,14 @@ static void twab_loadFFZSet(NSString *url, NSString *room) {
                 if (![em isKindOfClass:NSDictionary.class]) continue;
                 NSString *name = em[@"name"];
                 NSNumber *idNum = em[@"id"];
+                // FFZ: animated emotes have an `animated` dict of
+                // {scale: cdn_path}. Static emotes have it null/absent.
+                id animatedDict = em[@"animated"];
+                BOOL animated = [animatedDict isKindOfClass:NSDictionary.class] &&
+                                ((NSDictionary *)animatedDict).count > 0;
                 if ([name isKindOfClass:NSString.class] && name.length &&
                     [idNum isKindOfClass:NSNumber.class]) {
-                    twab_registerEmote(name, @"ffz", idNum.stringValue, room);
+                    twab_registerEmote(name, @"ffz", idNum.stringValue, room, animated);
                     n++;
                 }
             }
@@ -335,6 +363,45 @@ static void twab_loadChannelEmotes(NSString *roomId) {
 
 // ─── URL redirect ───────────────────────────────────────────────────────────
 
+// Single source of truth for the CDN URL format used by a given emote.
+// Both the hot-path URL rewrite (twab_rewriteEmoteURL) and the background
+// prefetcher (twab_prefetchEmoteImage) call into this so the two paths
+// can't drift.
+//
+// Format selection: Twitch's renderer animates emotes by decoding the
+// response bytes — native animated emotes are served as image/gif from
+// static-cdn.jtvnw.net (verified empirically). iOS UIImage natively
+// decodes animated GIF but NOT animated WebP, so animated emotes have
+// to be served as GIF.
+//
+// 7TV: animated emotes have a .gif variant on their CDN; static emotes
+// often DON'T (only .webp / .avif / .png), so blindly requesting .gif
+// 404s for those. The animated flag from the API drives the extension.
+//
+// BTTV: /2x serves GIF for animated emotes, PNG for static. Single URL
+// works for both, no need to branch.
+//
+// FFZ: animated emotes live at /animated/<scale>.gif; static at /<scale>
+// (no extension). The flag drives the path.
+static NSURL *twab_computeEmoteCDNURL(NSString *provider, NSString *realId, BOOL animated) {
+    if ([provider isEqualToString:@"7tv"]) {
+        NSString *ext = animated ? @"gif" : @"webp";
+        return [NSURL URLWithString:[NSString stringWithFormat:
+            @"https://cdn.7tv.app/emote/%@/2x.%@", realId, ext]];
+    }
+    if ([provider isEqualToString:@"bttv"])
+        return [NSURL URLWithString:[NSString stringWithFormat:
+            @"https://cdn.betterttv.net/emote/%@/2x", realId]];
+    if ([provider isEqualToString:@"ffz"]) {
+        if (animated)
+            return [NSURL URLWithString:[NSString stringWithFormat:
+                @"https://cdn.frankerfacez.com/emote/%@/animated/2.gif", realId]];
+        return [NSURL URLWithString:[NSString stringWithFormat:
+            @"https://cdn.frankerfacez.com/emote/%@/2", realId]];
+    }
+    return nil;
+}
+
 static NSURL *twab_rewriteEmoteURL(NSURL *url) {
     NSString *s = url.absoluteString;
     if (!s || ![s containsString:@"emoticons/v2/"]) return nil;
@@ -345,20 +412,9 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
     if (!entry) return nil;
     NSString *provider = entry[@"provider"];
     NSString *realId = entry[@"id"];
-
-    // 7TV's CDN doesn't pre-generate .gif for every emote — many only have
-    // .webp / .avif, so requesting .gif returns 404 and we render blank.
-    // .webp is universally available and iOS decodes static WebP natively.
-    if ([provider isEqualToString:@"7tv"])
-        return [NSURL URLWithString:[NSString stringWithFormat:
-            @"https://cdn.7tv.app/emote/%@/2x.webp", realId]];
-    if ([provider isEqualToString:@"bttv"])
-        return [NSURL URLWithString:[NSString stringWithFormat:
-            @"https://cdn.betterttv.net/emote/%@/2x", realId]];
-    if ([provider isEqualToString:@"ffz"])
-        return [NSURL URLWithString:[NSString stringWithFormat:
-            @"https://cdn.frankerfacez.com/emote/%@/2", realId]];
-    return nil;
+    NSNumber *animBox = entry[@"animated"];
+    BOOL animated = [animBox isKindOfClass:NSNumber.class] && [animBox boolValue];
+    return twab_computeEmoteCDNURL(provider, realId, animated);
 }
 
 // The leaf NSURLSession implementation in iOS is __NSURLSessionLocal,
@@ -399,6 +455,26 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
         os_log(OS_LOG_DEFAULT,
             "[TWAB-URL] __NSURLSessionLocal host=%{public}@ path=%{public}@",
             _host, request.URL.path ?: @"?");
+    }
+
+    // Emote URL capture — log every distinct emoticons/v2/ URL the chat
+    // requests (deduped so each unique URL prints once). Used to compare
+    // the URL format Twitch uses for native animated emotes (likely has
+    // "/animated/" in the path) vs static emotes (likely "/static/"). If
+    // Twitch's renderer keys animation off the URL path, we can route
+    // our synthetic IDs through the same scheme.
+    NSString *_path = request.URL.path;
+    if (_path && [_path containsString:@"emoticons/v2/"]) {
+        static NSMutableSet<NSString *> *seenEmoteURLs;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ seenEmoteURLs = [NSMutableSet set]; });
+        NSString *urlString = request.URL.absoluteString;
+        @synchronized (seenEmoteURLs) {
+            if (urlString && ![seenEmoteURLs containsObject:urlString]) {
+                [seenEmoteURLs addObject:urlString];
+                os_log(OS_LOG_DEFAULT, "[TWAB-EmoteURL] %{public}@", urlString);
+            }
+        }
     }
 
     BOOL adBlockOn = [tweakDefaults boolForKey:TWABKeyAdBlockEnabled];
@@ -699,7 +775,9 @@ static twab_recvHandler twab_wrapHandler(twab_recvHandler h) {
 %ctor {
     %init;
     if (objc_getClass("__NSURLSessionWebSocketTask")) %init(PrivateWS);
-    if (![tweakDefaults objectForKey:TWABKeyEmotesEnabled])
-        [tweakDefaults setBool:YES forKey:TWABKeyEmotesEnabled];
+    // NB: defaults for TWABKeyEmotesEnabled / TWABKeyEmotePrefetchEnabled
+    // are set in Tweak.x's %ctor, NOT here — Logos doesn't guarantee
+    // inter-file ctor ordering and tweakDefaults may be nil at this
+    // point, making any setBool: silently fail.
     twab_loadGlobalEmotes();
 }

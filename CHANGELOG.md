@@ -4,6 +4,46 @@ All notable changes from the original [level3tjg/TwitchAdBlock](https://github.c
 
 ---
 
+## [Fork v0.1.11] — 2026-05-18
+
+### Added — Animated 3rd-party emotes
+
+7TV / BTTV / FFZ animated emotes now actually animate in chat (previously rendered as static first frame). Twitch's chat renderer decodes whatever bytes the emote URL returns — and serves animated GIF for its own animated emotes. iOS's `UIImage` natively decodes animated GIF but NOT animated WebP, so we had to switch the redirect target from `.webp` to `.gif` to enable animation.
+
+Per-provider format selection now tracks the `animated` flag from each API at emote-load time:
+
+- **7TV**: `cdn.7tv.app/emote/<id>/2x.gif` for animated, `.webp` for static — many 7TV static emotes don't have a `.gif` variant on the CDN, so blindly requesting `.gif` would 404 and render blank.
+- **BTTV**: `cdn.betterttv.net/emote/<id>/2x` for both — same URL serves GIF for animated, PNG for static.
+- **FFZ**: `cdn.frankerfacez.com/emote/<id>/animated/2.gif` for animated, `/2` for static — animated FFZ emotes live at a different path entirely.
+
+Source flags: 7TV `em.data.animated`, BTTV `em.imageType == "gif"`, FFZ `em.animated` (non-empty dict).
+
+### Fixed — Emote settings default never applied on some installs
+
+`%ctor` ordering between Tweak.x and Emotes.x is not guaranteed in Logos. If `Emotes.x`'s `%ctor` ran before `Tweak.x`'s allocated `tweakDefaults`, the `[tweakDefaults setBool:YES forKey:TWABKeyEmotesEnabled]` silently no-op'd against a nil `NSUserDefaults` — leaving the key absent. Subsequent `boolForKey:` reads returned `NO`, looking exactly like an explicit user disable. The 3rd-party emotes toggle defaulted to OFF on affected installs.
+
+Moved the emote default to Tweak.x's `%ctor` (where `tweakDefaults` is guaranteed non-nil), plus a one-shot migration that force-writes `YES` once per device and sets a marker key so future toggles stick.
+
+### Added — `inject_ipa.py` ships with the repo
+
+Previously the injection script lived one directory above the repo (per the original development layout). Anyone cloning fresh got the build instructions but no injector. Copied into the repo root so `python3 inject_ipa.py` works out of the box.
+
+### Added — Features section in README
+
+New top-of-README **Features** section organized into Ad blocking / Chat / App customization / Compatibility buckets. Gives a scannable overview of capabilities without having to grep the changelog.
+
+### Changed — Reverted CI auto-build on `v*` tag pushes
+
+Added in v0.1.10, reverted here. The IPA-download step depends on `level3tjg/decryptedappstore-action`, which hard-codes a dependency on **decryptedappstore.com** — currently unreachable. Tag pushes are back to deb-only smoke builds; IPA builds are local-only via `make SIDELOADED=1` + `inject_ipa.py`.
+
+### Tried but didn't land — Background emote-image prefetch
+
+Implemented eager `NSURLSession` prefetching of all 7TV/BTTV/FFZ emote URLs at channel-join time, with a dedicated 15-way-concurrent prefetch session and `NSURLCache.sharedURLCache` pinning. Goal was reducing first-appearance latency by warming the OS URL cache before chat's renderer asked for each emote.
+
+Empirical result: no perceptible change. Most likely Twitch's chat session uses a private NSURLCache (or its own in-memory image cache that bypasses NSURLCache entirely), so our shared-cache warming was invisible to the renderer. Removed entirely rather than ship a feature that costs ~5MB of background bandwidth per channel join without buying anything. The `twab_computeEmoteCDNURL` helper extracted for prefetch stays — it's the single URL-format source of truth for the URL rewriter.
+
+---
+
 ## [Fork v0.1.10] — 2026-05-17
 
 ### Added — Multi-proxy custom proxy list with reorder + delete UI
