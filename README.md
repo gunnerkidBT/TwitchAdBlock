@@ -6,6 +6,40 @@
 
 ---
 
+## Features
+
+### Ad blocking
+- **Live stream preroll ad blocking** via proxy — either V2 / ttv-lol-pro–compatible (URL rewrite + Basic auth) or standard HTTP CONNECT tunneling
+- **VOD preroll ad blocking** via the same proxy path
+- **GraphQL-level ad stripping** — removes `OfferPromotion` (McDonald's-style brand banners), `PromotionDisplay`, `BitsProductPromotion` ("buy Bits" prompt), and `FeedAd` (Following-feed ad cards)
+- **Recursive ad-typename diagnostic** — surfaces unknown `Ad` / `Promot` / `Sponsor` / `Headliner` typenames so new ad surfaces can be added to the blocklist quickly
+- **Ad-host hard block** — `edge.ads.twitch.tv`, `spade.twitch.tv`, `*.amazon-adsystem.com`, and Nielsen domains return nil tasks immediately
+- **Bundled default proxy** — works out of the box without configuration (V1-compatible)
+- **Custom proxy support** — `user:pass@host:port` format with Basic auth automatically injected
+- **Multi-proxy fallback list** — reorderable list of proxies tried in order; first to ping/200 wins for V2 rewrite, first parseable used for CONNECT fallback
+- **Subscriber / Turbo bypass** — token-aware skip when the user is ad-exempt (avoids exposing their auth token to the proxy)
+- **Live proxy reachability status** — `● Online` / `● Offline` indicator with raw TCP probe
+- **Per-proxy ping verdict cache** — multi-proxy lists don't re-ping every entry on every request
+
+### Chat
+- **7TV emote rendering** in chat — globals + per-channel sets
+- **BetterTTV emote rendering** in chat — globals + per-channel sets
+- **FrankerFaceZ emote rendering** in chat — globals + per-channel sets
+- **LRU emote cache** — bounded to 50 rooms; oldest emotes evicted, globals never expire
+- **Grapheme-cluster–accurate emote position math** for IRC `emotes=` tag offsets
+
+### App customization
+- **Launch Screen picker** — choose what tab Twitch opens to (Home → Following / Live / Clips, Browse → Categories / Live Channels, Activity, Profile, or Twitch's default)
+- **Hide Twitch Stories** — removes the horizontal Stories strip at the top of the Home tab
+- **TwitchMods account-menu entry** — bold themed cell with leading icon, opens the settings screen
+
+### Compatibility
+- **Twitch 29.x** — handles renamed GraphQL operations + Apollo batched-array request shape
+- **iOS 26** — works around `___isOSVersionAtLeast` resolution failure and `UIListContentConfiguration` requirements
+- **Sideloaded / no jailbreak / no Substrate** — `inject_ipa.py` handles dylib injection + ATS bypass; settings VC built without Logos `%subclass`
+
+---
+
 ## What changed
 
 This fork fixes several issues that broke TwitchAdBlock on **Twitch 29.x** and **iOS 26** when sideloaded (no jailbreak / no Substrate):
