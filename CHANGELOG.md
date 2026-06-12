@@ -4,6 +4,24 @@ All notable changes from the original [level3tjg/TwitchAdBlock](https://github.c
 
 ---
 
+## [Twitch 29.8 compatibility build] — 2026-06-12
+
+Re-verified and re-built v0.1.11 against **Twitch iOS 29.8** (previous target was 29.4.2). No tweak source changes — the compiled `TwitchAdBlock.dylib` is byte-identical to the v0.1.11 release; only the host IPA changed. `inject_ipa.py` parses the Mach-O generically, so updating to a new Twitch version is a re-injection, not a recompile.
+
+### Verified — all required hooks resolve in 29.8
+
+Every hooked mangled Swift class (`_TtC6Twitch…` in `*.x`) was checked against the 29.8 binaries before shipping:
+
+- All 13 main-app `_TtC6Twitch…` hooks resolve (TabBar, Browse, DiscoveryFeed, Following, AccountMenu, URLController, HeadlinerFollowingAdManager, settings cells, LoggedOut/PrivacyConsent login-fix).
+- `_TtC9TwitchKit18TKURLSessionClient` resolves in `TwitchKit.framework`; `_TtC6Apollo16URLSessionClient` resolves in the now hash-suffixed `Apollo_…_PackageProduct.framework` (class name unchanged).
+- `_TtC6Twitch27AssetResourceLoaderDelegate` is **absent** in 29.8 — but it is a legacy/optional hook (explicitly marked "silently skipped if missing", not in `twab_warnIfClassMissing`), so its absence is expected. The primary ad-block path is the `__NSURLSessionLocal` proxy hook, which is intact.
+
+### Build
+
+`tv.twitch-29.8-TwitchAdBlock-0.1.11.ipa` — dylib injected, `LC_LOAD_DYLIB` present, `NSAllowsArbitraryLoads` patched for plain-HTTP proxy support. Built by re-injecting the v0.1.11 dylib (WSL2/Theos is currently unbootable on the build PC; rebuild from source once virtualization is re-enabled if tweak code changes).
+
+---
+
 ## [Fork v0.1.11] — 2026-05-18
 
 ### Added — Animated 3rd-party emotes
