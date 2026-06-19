@@ -6,7 +6,13 @@ injects an LC_LOAD_DYLIB load command into the Twitch Mach-O binary,
 and repacks into a new IPA ready for sideloading.
 
 Usage:
-    python3 inject_ipa.py <input.ipa> <TwitchTTVLOL.dylib> [output.ipa]
+    python3 inject_ipa.py <input.ipa> <TwitchTTVLOL.dylib> [output.ipa] [--no-plugins]
+
+Options:
+    --no-plugins   Strip Payload/<App>.app/PlugIns (all app extensions) before
+                   repacking. Each extension is a separate bundle ID that
+                   consumes an App ID slot when sideloading; removing them lets
+                   free Apple ID accounts (10 App IDs / 7 days) install the app.
 """
 
 import struct
@@ -194,9 +200,13 @@ def main():
         print(__doc__)
         sys.exit(1)
 
-    ipa_path  = sys.argv[1]
-    dylib_src = sys.argv[2]
-    out_path  = sys.argv[3] if len(sys.argv) > 3 else ipa_path.replace(".ipa", "-patched.ipa")
+    args        = sys.argv[1:]
+    no_plugins  = "--no-plugins" in args
+    args        = [a for a in args if a != "--no-plugins"]
+
+    ipa_path  = args[0]
+    dylib_src = args[1]
+    out_path  = args[2] if len(args) > 2 else ipa_path.replace(".ipa", "-patched.ipa")
 
     print(f"[1/5] Reading IPA: {ipa_path}")
     with zipfile.ZipFile(ipa_path, "r") as z:
@@ -228,6 +238,20 @@ def main():
     try:
         with zipfile.ZipFile(ipa_path, "r") as z:
             z.extractall(tmpdir)
+
+        if no_plugins:
+            plugins_dir = os.path.join(tmpdir, f"Payload/{app_name}/PlugIns")
+            if os.path.isdir(plugins_dir):
+                removed = sorted(
+                    d for d in os.listdir(plugins_dir)
+                    if d.endswith(".appex")
+                )
+                shutil.rmtree(plugins_dir)
+                print(f"  Stripped PlugIns/ — removed {len(removed)} app extension(s):")
+                for d in removed:
+                    print(f"      - {d}")
+            else:
+                print("  --no-plugins set but no PlugIns/ directory found — nothing to strip")
 
         binary_path = os.path.join(tmpdir, binary_zip_path)
         frameworks_dir = os.path.join(tmpdir, f"Payload/{app_name}/Frameworks")

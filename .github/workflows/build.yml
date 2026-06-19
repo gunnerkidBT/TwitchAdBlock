@@ -1,22 +1,24 @@
 name: CI
 
-# IPA build + draft release ONLY runs via manual workflow_dispatch with
-# create_release=true. Branch / tag pushes build the debs as a smoke
-# test. Tag-push auto-builds were attempted in v0.1.10 but reverted —
-# the IPA download step depends on decryptedappstore.com which is
-# unreachable, and there's no alternative download source the action
-# supports. For IPA builds, build locally with `make SIDELOADED=1` +
-# `inject_ipa.py` (see README).
+# Every push builds the rootless/rootful debs as a smoke test (no IPA — a CI
+# runner cannot legally obtain a decrypted Twitch IPA on its own).
+#
+# IPA builds run only via manual workflow_dispatch with create_release=true,
+# and require an `ipa_url` pointing at a DECRYPTED Twitch IPA you host yourself
+# (temp file host, private cloud link, private release asset, etc.). The job
+# then builds the dylib with Theos and runs inject_ipa.py to produce BOTH a
+# full IPA and a --no-plugins IPA (all app extensions stripped — fits free
+# Apple ID accounts limited to 10 App IDs / 7 days), then drafts a release.
 on:
   push:
   workflow_dispatch:
     inputs:
       create_release:
-        description: "Build IPA and create draft release"
+        description: "Build IPAs and create a draft release"
         default: false
         type: boolean
       ipa_url:
-        description: "Direct URL to Decrypted IPA file"
+        description: "Direct URL to a DECRYPTED Twitch IPA (required when create_release=true)"
         type: string
         required: false
 
@@ -32,58 +34,9 @@ jobs:
       - name: Get package info
         id: package_info
         run: |
-          version=$(cat Makefile | grep "PACKAGE_VERSION =" | cut -d' ' -f3)
-          if [ -z $version ]; then
-            version=$(cat control | grep "Version:" | cut -d' ' -f2)
-          fi
-          echo "id=$(cat control | grep "Package:" | cut -d' ' -f2)" >> $GITHUB_OUTPUT
-          echo "version=$version" >> $GITHUB_OUTPUT
-
-      - name: Install dependencies
-        if: ${{ inputs.create_release }}
-        run: |
-          sudo apt update
-          sudo apt install -y build-essential checkinstall git autoconf automake libtool-bin rsync llvm xmlstarlet
-          curl -L https://github.com/libimobiledevice/libplist/releases/download/2.4.0/libplist-2.4.0.tar.bz2 | bzip2 -d | tar -x
-          cd libplist*
-          ./configure
-          sudo make install
-          sudo ldconfig
-
-      - name: Download IPA (Auto)
-        if: ${{ inputs.create_release && !inputs.ipa_url }}
-        uses: level3tjg/decryptedappstore-action@main
-        with:
-          appstore_url: "https://apps.apple.com/us/app/twitch-live-streaming/id460177396"
-          cache: true
-          path: ${{ github.workspace }}/App.ipa
-          token: ${{ secrets.DECRYPTEDAPPSTORE_SESSION_TOKEN }}
-
-      - name: Download IPA (Manual)
-        if: ${{ inputs.create_release && inputs.ipa_url }}
-        run: |
-          curl -Lo "${{ github.workspace }}/App.ipa" "${{ inputs.ipa_url }}"
-          zip -T "${{ github.workspace }}/App.ipa"
-
-      - name: Download STS IPA
-        if: ${{ inputs.create_release }}
-        run: |
-          curl -Lo "${{ github.workspace }}/STS.ipa" "https://nextcloud.level3tjg.me/s/b2WcDdDMN3ZXkYf/download/tv.twitch_19.4.ipa"
-          zip -T "${{ github.workspace }}/STS.ipa"
-
-      - name: Download LTS IPA
-        if: ${{ inputs.create_release }}
-        run: |
-          curl -Lo "${{ github.workspace }}/LTS.ipa" "https://nextcloud.level3tjg.me/s/QEyiJD3FK6AfxTA/download/tv.twitch_12.8.1.ipa"
-          zip -T "${{ github.workspace }}/LTS.ipa"
-
-      - name: Get IPA Info
-        if: ${{ inputs.create_release }}
-        id: ipa_info
-        run: |
-          info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
-          echo "bundle-id=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleIdentifier\"]/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
-          echo "version=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleShortVersionString\"]/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
+          version=$(grep "PACKAGE_VERSION =" Makefile | head -1 | cut -d' ' -f3)
+          echo "id=$(grep "Package:" control | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Setup theos
         uses: level3tjg/theos-action@main
@@ -92,21 +45,8 @@ jobs:
           cache-dir-theos: ${{ github.workspace }}/theos
           cache-dir-sdks: ${{ github.workspace }}/theos/sdks
 
-      - name: Checkout theos-jailed
-        if: ${{ inputs.create_release }}
-        uses: actions/checkout@v4
-        with:
-          repository: level3tjg/theos-jailed
-          path: theos-jailed
-          submodules: recursive
-
-      - name: Install theos-jailed
-        if: ${{ inputs.create_release }}
-        run: |
-          ./theos-jailed/install
-          cd libplist*
-          sudo make uninstall
-
+      # ---------------------------------------------------------------- debs
+      # Smoke test on every run; final (stripped) packages when releasing.
       - name: Build rootless deb
         run: make package
         env:
@@ -118,45 +58,76 @@ jobs:
         env:
           FINALPACKAGE: ${{ inputs.create_release }}
 
-      - name: Build IPA
-        if: ${{ inputs.create_release }}
-        run: make package
-        env:
-          FINALPACKAGE: 1
-          SIDELOADED: 1
-          IPA: ${{ github.workspace }}/App.ipa
-          APP_VERSION: ${{ steps.ipa_info.outputs.version }}
-
-      - name: Build STS IPA
-        if: ${{ inputs.create_release }}
-        run: make package
-        env:
-          FINALPACKAGE: 1
-          SIDELOADED: 1
-          IPA: ${{ github.workspace }}/STS.ipa
-          APP_VERSION: "19.4"
-          STS: 1
-
-      - name: Build LTS IPA
-        if: ${{ inputs.create_release }}
-        run: make package
-        env:
-          FINALPACKAGE: 1
-          SIDELOADED: 1
-          IPA: ${{ github.workspace }}/LTS.ipa
-          APP_VERSION: "12.8.1"
-          LTS: 1
-
-      - name: Upload artifacts
+      - name: Upload deb artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.package_info.outputs.id }}_${{ steps.package_info.outputs.version }}
+          name: ${{ steps.package_info.outputs.id }}_${{ steps.package_info.outputs.version }}_debs
           path: packages/*
 
-      - name: Create release
+      # ----------------------------------------------------------------- IPA
+      - name: Validate inputs
+        if: ${{ inputs.create_release }}
+        run: |
+          if [ -z "${{ inputs.ipa_url }}" ]; then
+            echo "::error::create_release=true requires an ipa_url (direct link to a DECRYPTED Twitch IPA)."
+            exit 1
+          fi
+
+      - name: Download decrypted IPA
+        if: ${{ inputs.create_release }}
+        run: |
+          curl -fSL -o "${{ github.workspace }}/App.ipa" "${{ inputs.ipa_url }}"
+          unzip -tq "${{ github.workspace }}/App.ipa" >/dev/null
+          echo "Downloaded $(du -h "${{ github.workspace }}/App.ipa" | cut -f1) IPA"
+
+      - name: Build dylib
+        if: ${{ inputs.create_release }}
+        run: make clean && make -j"$(nproc)"
+        env:
+          FINALPACKAGE: 1
+
+      - name: Locate dylib
+        if: ${{ inputs.create_release }}
+        id: dylib
+        run: |
+          path=$(find .theos -name 'TwitchAdBlock.dylib' ! -path '*.dSYM*' | head -1)
+          if [ -z "$path" ]; then
+            echo "::error::TwitchAdBlock.dylib not found after build."
+            exit 1
+          fi
+          echo "Built: $path"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Read Twitch app version
+        if: ${{ inputs.create_release }}
+        id: ipa_info
+        run: |
+          ver=$(python3 - "${{ github.workspace }}/App.ipa" <<'PY'
+          import sys, zipfile, plistlib, io
+          z = zipfile.ZipFile(sys.argv[1])
+          name = next(n for n in z.namelist()
+                      if n.startswith("Payload/") and n.endswith(".app/Info.plist"))
+          d = plistlib.load(io.BytesIO(z.read(name)))
+          print(d["CFBundleShortVersionString"])
+          PY
+          )
+          echo "Twitch version: $ver"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Inject dylib (full + no-plugins)
+        if: ${{ inputs.create_release }}
+        run: |
+          mkdir -p out
+          base="tv.twitch-${{ steps.ipa_info.outputs.version }}-TwitchAdBlock-${{ steps.package_info.outputs.version }}"
+          python3 inject_ipa.py "${{ github.workspace }}/App.ipa" "${{ steps.dylib.outputs.path }}" "out/${base}.ipa"
+          python3 inject_ipa.py "${{ github.workspace }}/App.ipa" "${{ steps.dylib.outputs.path }}" "out/${base}-noplugins.ipa" --no-plugins
+          ls -lh out
+
+      - name: Create draft release
         if: ${{ inputs.create_release }}
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          files: packages/*
           tag_name: v${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}
+          name: v${{ steps.ipa_info.outputs.version }} — TwitchAdBlock ${{ steps.package_info.outputs.version }}
+          files: out/*.ipa
