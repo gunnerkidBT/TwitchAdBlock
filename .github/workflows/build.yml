@@ -34,8 +34,9 @@ jobs:
       - name: Get package info
         id: package_info
         run: |
-          version=$(grep "PACKAGE_VERSION =" Makefile | head -1 | cut -d' ' -f3)
-          echo "id=$(grep "Package:" control | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+          version=$(grep "PACKAGE_VERSION =" Makefile | head -1 | cut -d' ' -f3 | tr -d '\r')
+          id=$(grep "Package:" control | cut -d' ' -f2 | tr -d '\r')
+          echo "id=$id" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Setup theos
