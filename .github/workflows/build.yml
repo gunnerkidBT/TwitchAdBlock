@@ -155,11 +155,15 @@ jobs:
           python3 inject_ipa.py "${{ github.workspace }}/App.ipa" "${{ steps.dylib.outputs.path }}" "out/${base}-noplugins.ipa" --no-plugins
           ls -lh out
 
+      # Publish to a distinct `-ci` draft tag so re-runs never mutate a
+      # hand-published release (softprops updates the release matching the
+      # tag). Review the draft, then publish/rename to the real tag yourself.
       - name: Create draft release
         if: ${{ inputs.create_release }}
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          tag_name: v${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}
-          name: v${{ steps.ipa_info.outputs.version }} — TwitchAdBlock ${{ steps.package_info.outputs.version }}
+          tag_name: v${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}-ci
+          name: "CI draft: v${{ steps.ipa_info.outputs.version }} — TwitchAdBlock ${{ steps.package_info.outputs.version }}"
+          body: "Automated CI build (full + no-plugins IPAs). Verify, then publish under the real `v${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}` tag."
           files: out/*.ipa
