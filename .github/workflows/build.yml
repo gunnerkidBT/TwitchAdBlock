@@ -77,9 +77,20 @@ jobs:
       - name: Download decrypted IPA
         if: ${{ inputs.create_release }}
         run: |
-          curl -fSL -o "${{ github.workspace }}/App.ipa" "${{ inputs.ipa_url }}"
-          unzip -tq "${{ github.workspace }}/App.ipa" >/dev/null
-          echo "Downloaded $(du -h "${{ github.workspace }}/App.ipa" | cut -f1) IPA"
+          ipa="${{ github.workspace }}/App.ipa"
+          curl -fSL -o "$ipa" "${{ inputs.ipa_url }}"
+          size=$(stat -c%s "$ipa")
+          echo "Downloaded $(numfmt --to=iec "$size") ($size bytes)"
+          # A real IPA is a zip — first two bytes must be the "PK" magic. A
+          # share/landing page returns tiny HTML instead, so fail loudly with
+          # guidance rather than a cryptic unzip error downstream.
+          magic=$(head -c2 "$ipa")
+          if [ "$magic" != "PK" ] || [ "$size" -lt 1000000 ]; then
+            echo "::error::ipa_url did not return a valid IPA (got $size bytes, magic '$magic'). You almost certainly passed a share/landing-page link rather than a DIRECT download URL. Use a link that returns the raw file bytes (see PR notes for hosts that work with curl)."
+            head -c512 "$ipa" || true
+            exit 1
+          fi
+          unzip -tq "$ipa" >/dev/null
 
       - name: Build dylib
         if: ${{ inputs.create_release }}
