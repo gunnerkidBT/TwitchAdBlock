@@ -9,6 +9,11 @@ name: CI
 # then builds the dylib with Theos and runs inject_ipa.py to produce BOTH a
 # full IPA and a --no-plugins IPA (all app extensions stripped — fits free
 # Apple ID accounts limited to 10 App IDs / 7 days), then drafts a release.
+#
+# The decrypted IPA is pulled from the `decrypted-source` DRAFT release (an
+# asset there, not publicly visible) via the built-in GITHUB_TOKEN — no
+# third-party host. To update for a new Twitch version, replace that asset.
+# `ipa_url` is an optional override for testing a one-off direct link.
 on:
   push:
   workflow_dispatch:
@@ -17,10 +22,17 @@ on:
         description: "Build IPAs and create a draft release"
         default: false
         type: boolean
+      source_tag:
+        description: "Draft release tag holding the decrypted IPA asset"
+        default: "decrypted-source"
+        type: string
       ipa_url:
-        description: "Direct URL to a DECRYPTED Twitch IPA (required when create_release=true)"
+        description: "Optional: direct URL to a decrypted IPA (overrides source_tag)"
         type: string
         required: false
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -66,27 +78,35 @@ jobs:
           path: packages/*
 
       # ----------------------------------------------------------------- IPA
-      - name: Validate inputs
+      - name: Fetch decrypted IPA
         if: ${{ inputs.create_release }}
-        run: |
-          if [ -z "${{ inputs.ipa_url }}" ]; then
-            echo "::error::create_release=true requires an ipa_url (direct link to a DECRYPTED Twitch IPA)."
-            exit 1
-          fi
-
-      - name: Download decrypted IPA
-        if: ${{ inputs.create_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ipa="${{ github.workspace }}/App.ipa"
-          curl -fSL -o "$ipa" "${{ inputs.ipa_url }}"
+          if [ -n "${{ inputs.ipa_url }}" ]; then
+            echo "Using ipa_url override"
+            curl -fSL -o "$ipa" "${{ inputs.ipa_url }}"
+          else
+            tag="${{ inputs.source_tag }}"
+            echo "Downloading decrypted IPA from draft release '$tag'"
+            rm -rf _src && mkdir -p _src
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*.ipa' --dir _src
+            src=$(find _src -name '*.ipa' | head -1)
+            if [ -z "$src" ]; then
+              echo "::error::No .ipa asset found on release '$tag'. Upload your decrypted Twitch IPA there (gh release upload $tag App.ipa)."
+              exit 1
+            fi
+            mv "$src" "$ipa"
+          fi
           size=$(stat -c%s "$ipa")
           echo "Downloaded $(numfmt --to=iec "$size") ($size bytes)"
           # A real IPA is a zip — first two bytes must be the "PK" magic. A
-          # share/landing page returns tiny HTML instead, so fail loudly with
-          # guidance rather than a cryptic unzip error downstream.
+          # share/landing page (or an HTML error) returns tiny content instead,
+          # so fail loudly rather than dying on a cryptic unzip error later.
           magic=$(head -c2 "$ipa")
           if [ "$magic" != "PK" ] || [ "$size" -lt 1000000 ]; then
-            echo "::error::ipa_url did not return a valid IPA (got $size bytes, magic '$magic'). You almost certainly passed a share/landing-page link rather than a DIRECT download URL. Use a link that returns the raw file bytes (see PR notes for hosts that work with curl)."
+            echo "::error::Not a valid IPA (got $size bytes, magic '$magic'). If using ipa_url, it must be a DIRECT download (raw bytes), not a share/landing page. If using the source release, check the '*.ipa' asset on tag '${{ inputs.source_tag }}'."
             head -c512 "$ipa" || true
             exit 1
           fi
