@@ -410,9 +410,13 @@ static Ivar twab_findIvar(id obj, const char *name) {
 // set its contentOffset to the target page, and also write the internal
 // selectedContentViewControllerIndex ivar so the top-tab indicator
 // follows the new selection.
+// Defined later in this file — scans all windows for the "Go Ad-Free" upsell.
+static void twab_handleAdFree(void);
+
 %hook _TtC6Twitch30DiscoveryFeedTabViewController
 - (void)viewDidLayoutSubviews {
     %orig;
+    twab_handleAdFree();
     if (![tweakDefaults objectForKey:TWABKeyLaunchSubTab]) return;
     if ([tweakDefaults integerForKey:TWABKeyLaunchTab] != 0) return;
     NSInteger sub = [tweakDefaults integerForKey:TWABKeyLaunchSubTab];
@@ -589,51 +593,102 @@ static BOOL twab_tryHideStories(UIViewController *vc) {
 }
 %end
 
-// Hide the "Go Ad-Free" Turbo upsell banner on the Following tab.
-// FollowingViewController owns it via the `turboUpsellView` /
-// `turboUpsellViewController` ivars (confirmed in the 29.9 binary, alongside
-// the "Following upsell button tapped" event). presentTurboUpsell is a
-// non-@objc Swift method so it can't be hooked directly; instead we hide the
-// view on each layout pass — idempotent (once hidden it short-circuits) and
-// resilient to Twitch re-adding it. Mirrors the Stories-removal approach.
-static void twab_collapseUpsellView(UIView *v) {
-  if (!v || v.hidden) return;
-  v.hidden = YES;
-  static char collapsedKey;
-  if (!objc_getAssociatedObject(v, &collapsedKey)) {
-    NSLayoutConstraint *zero = [v.heightAnchor constraintEqualToConstant:0];
-    zero.priority = UILayoutPriorityRequired;
-    zero.active = YES;
-    objc_setAssociatedObject(v, &collapsedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-  }
+// Hide the "Go Ad-Free" Turbo upsell button on the Following tab.
+//
+// It's a TwitchCoreUI.StandardButton with the title "Go Ad-Free", living in the
+// "Live Now" section header (NOT in FollowingViewController.view directly). We
+// hook the button class so it's hidden the instant it lays out — matched by its
+// title / accessibility label (it's drawn by a Swift control, so we can't key
+// off the class name). A window scan runs as a backup. We never touch the
+// dedicated Turbo purchase screen. NOTE: the leftover header height is fixed by
+// Twitch's feed collection layout (it ignores view-level size overrides), so we
+// hide the button but don't fight the layout to reclaim that ~24pt of padding.
+static BOOL twab_viewInPurchaseScreen(UIView *v) {
+  Class purchase = objc_getClass("_TtC6Twitch25TurboUpsellViewController");
+  if (!purchase) return NO;
+  for (UIResponder *r = v.nextResponder; r; r = r.nextResponder)
+    if ([r isKindOfClass:purchase]) return YES;
+  return NO;
 }
 
-static void twab_hideFollowingUpsell(id vc) {
-  // Known banner ivar first.
-  Ivar viewIv = twab_findIvar(vc, "turboUpsellView");
-  if (viewIv) {
-    id v = object_getIvar(vc, viewIv);
-    if ([v isKindOfClass:[UIView class]]) { twab_collapseUpsellView(v); return; }
-  }
-  // Child-VC variant — collapse its view if it's loaded.
-  Ivar vcIv = twab_findIvar(vc, "turboUpsellViewController");
-  if (vcIv) {
-    id child = object_getIvar(vc, vcIv);
-    if ([child isKindOfClass:[UIViewController class]]) {
-      UIView *cv = ((UIViewController *)child).viewIfLoaded;
-      if (cv) { twab_collapseUpsellView(cv); return; }
-    }
-  }
-  // Fallback — scan the view tree for any TurboUpsell* view.
-  UIView *found = twab_findSubviewMatching(((UIViewController *)vc).view, @"TurboUpsell");
-  if (found) twab_collapseUpsellView(found);
+static BOOL twab_strContains(NSString *s, NSString *needle) {
+  return s && [s rangeOfString:needle options:NSCaseInsensitiveSearch].location != NSNotFound;
 }
+
+// Best-effort visible text of a view across UIKit/SwiftUI: label text, button
+// title, or accessibility label (custom/Swift controls expose their visible
+// text via accessibilityLabel even though they draw it rather than using a
+// UILabel — this is how we match the "Go Ad-Free" pill).
+static NSString *twab_viewText(UIView *v) {
+  if ([v isKindOfClass:[UILabel class]] && [(UILabel *)v text].length)
+    return [(UILabel *)v text];
+  if ([v isKindOfClass:[UIButton class]]) {
+    UIButton *b = (UIButton *)v;
+    if (b.currentTitle.length) return b.currentTitle;
+    if (b.currentAttributedTitle.string.length) return b.currentAttributedTitle.string;
+  }
+  if (v.accessibilityLabel.length) return v.accessibilityLabel;
+  return nil;
+}
+
+static BOOL twab_isAdFreeText(NSString *txt) {
+  return twab_strContains(txt, @"Ad-Free") || twab_strContains(txt, @"Ad Free");
+}
+
+// Hide + zero-size the matched control, once per instance (associated-object
+// guard so we don't re-add constraints every layout, which would loop).
+static void twab_killAdFreeButton(UIView *v) {
+  if (!v) return;
+  static char doneKey;
+  if (objc_getAssociatedObject(v, &doneKey)) return;
+  if (twab_viewInPurchaseScreen(v)) return;
+  objc_setAssociatedObject(v, &doneKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  v.hidden = YES;
+  v.translatesAutoresizingMaskIntoConstraints = NO;  // hidden, so frame loss is fine
+  NSLayoutConstraint *w = [v.widthAnchor constraintEqualToConstant:0];
+  NSLayoutConstraint *h = [v.heightAnchor constraintEqualToConstant:0];
+  w.priority = h.priority = (UILayoutPriority)999;
+  w.active = h.active = YES;
+}
+
+// Backup window scan: hide any Upsell/AdFree-classed or "Ad-Free"-titled view.
+static void twab_scanForAdFree(UIView *root) {
+  if (!root) return;
+  NSString *cls = NSStringFromClass([root class]);
+  if ((twab_strContains(cls, @"Upsell") || twab_strContains(cls, @"AdFree") ||
+       twab_isAdFreeText(twab_viewText(root))) && !root.hidden) {
+    twab_killAdFreeButton(root);
+    return;  // handled; don't descend
+  }
+  for (UIView *sub in [root.subviews copy]) twab_scanForAdFree(sub);
+}
+
+static void twab_handleAdFree(void) {
+  if (![tweakDefaults boolForKey:TWABKeyHideAdFreeButton]) return;
+  for (UIWindow *w in [UIApplication.sharedApplication.windows copy])
+    twab_scanForAdFree(w);
+}
+
+// Catch the "Go Ad-Free" pill the instant it lays out — no touch/scroll needed.
+%hook _TtC12TwitchCoreUI14StandardButton
+- (void)didMoveToWindow {
+  %orig;
+  if (![tweakDefaults boolForKey:TWABKeyHideAdFreeButton]) return;
+  UIView *btn = (UIView *)self;
+  if (twab_isAdFreeText(twab_viewText(btn))) twab_killAdFreeButton(btn);
+}
+- (void)layoutSubviews {
+  %orig;
+  if (![tweakDefaults boolForKey:TWABKeyHideAdFreeButton]) return;
+  UIView *btn = (UIView *)self;
+  if (twab_isAdFreeText(twab_viewText(btn))) twab_killAdFreeButton(btn);
+}
+%end
 
 %hook _TtC6Twitch23FollowingViewController
 - (void)viewDidLayoutSubviews {
   %orig;
-  if (![tweakDefaults boolForKey:TWABKeyHideAdFreeButton]) return;
-  twab_hideFollowingUpsell(self);
+  twab_handleAdFree();
 }
 %end
 
