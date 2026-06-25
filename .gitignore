@@ -3,3 +3,4 @@
 packages/
 *.dSYM
 Resources
+CHANGELOG.technical.md

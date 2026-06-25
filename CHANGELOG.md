@@ -3,9 +3,6 @@
 A plain-language list of what's changed in TwitchMods — what each update
 actually *does for you*, in normal words. Newest changes are at the top.
 
-> Looking for the deep technical details (class names, code internals)? Those
-> live in `CHANGELOG.technical.md`.
-
 ---
 
 ## v0.1.12 — June 25, 2026
