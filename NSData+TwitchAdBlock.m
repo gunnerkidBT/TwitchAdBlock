@@ -1,5 +1,8 @@
 #import "NSData+TwitchAdBlock.h"
+#import "SettingsKeys.h"
 #import <os/log.h>
+
+extern NSUserDefaults *tweakDefaults;
 
 // Known ad-related __typename values, split by how aggressively we can
 // strip them. Two semantics:
@@ -24,6 +27,7 @@ static NSSet *twab_arrayAdTypenames(void) {
             @"OfferPromotion",        // brand offers (McDonalds banner etc.)
             @"PromotionDisplay",      // wrapper around offer promotions
             @"BitsProductPromotion",  // "buy Bits" prompt
+            @"HostReadAd",            // streamer-read sponsor ad node
             nil];
     });
     return s;
@@ -77,7 +81,9 @@ static BOOL twab_isSuspectTypename(NSString *typename) {
     return [typename containsString:@"Ad"] ||
            [typename containsString:@"Promot"] ||
            [typename containsString:@"Sponsor"] ||
-           [typename containsString:@"Headliner"];
+           [typename containsString:@"Headliner"] ||
+           [typename containsString:@"Upsell"] ||
+           [typename containsString:@"Recommendation"];
 }
 
 static void twab_processTree(id obj, NSSet *arraySet, NSSet *fieldSet,
@@ -147,6 +153,36 @@ static void twab_processTree(id obj, NSSet *arraySet, NSSet *fieldSet,
             *dirty = YES;
             [a removeObjectsAtIndexes:toRemove];
         }
+    }
+}
+
+// The Evolve "Live" feed stops a preview after `watchBehavior.maxStreamWatchSeconds`
+// and shows the EvolveFeedMaxWatchtimeOverlayView (the Watch/Follow blocking
+// overlay). Rewriting that value to an effectively-infinite number means the
+// countdown bar never depletes within a session, so playback continues. We set
+// a large value rather than deleting the key so any `if let max = ...`
+// breakpoint logic still gets a (huge) number instead of treating nil as a
+// different default. INT_MAX seconds ≈ 68 years. Sets *dirty=YES on change.
+static void twab_neutralizeWatchLimits(id obj, BOOL *dirty) {
+    if ([obj isKindOfClass:NSMutableDictionary.class]) {
+        NSMutableDictionary *d = obj;
+        for (NSString *key in [d allKeys]) {
+            id val = d[key];
+            if ([key isEqualToString:@"maxStreamWatchSeconds"] &&
+                [val isKindOfClass:NSNumber.class]) {
+                NSNumber *capped = @(2147483647);
+                if (![val isEqual:capped]) {
+                    d[key] = capped;
+                    *dirty = YES;
+                    os_log(OS_LOG_DEFAULT,
+                        "[TWAB-Watch] neutralized maxStreamWatchSeconds (was %{public}@)", val);
+                }
+                continue;
+            }
+            twab_neutralizeWatchLimits(val, dirty);
+        }
+    } else if ([obj isKindOfClass:NSMutableArray.class]) {
+        for (id val in (NSMutableArray *)obj) twab_neutralizeWatchLimits(val, dirty);
     }
 }
 
@@ -229,11 +265,13 @@ static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
     // is sensitive to byte-level differences, which broke Clips).
     NSSet *arraySet = twab_arrayAdTypenames();
     NSSet *fieldSet = twab_fieldAdTypenames();
+    BOOL stripWatchLimit = [tweakDefaults boolForKey:TWABKeyDisableWatchLimit];
     BOOL dirty = NO;
     NSArray *ops = [json isKindOfClass:NSMutableArray.class] ? json : @[json];
     for (NSMutableDictionary *op in ops) {
         if (![op isKindOfClass:NSMutableDictionary.class]) continue;
         twab_processTree(op[@"data"], arraySet, fieldSet, op[@"operationName"], &dirty);
+        if (stripWatchLimit) twab_neutralizeWatchLimits(op[@"data"], &dirty);
     }
     if (!dirty) return self;
     NSData *out = [NSJSONSerialization dataWithJSONObject:json options:0 error:&error];

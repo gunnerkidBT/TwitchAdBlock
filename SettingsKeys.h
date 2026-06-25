@@ -21,6 +21,14 @@ extern NSString *const TWABKeyLaunchSubTab;
 // BOOL — when YES, the Twitch Stories horizontal strip at the top of the
 // Home tab is removed from the view hierarchy on first layout.
 extern NSString *const TWABKeyHideStories;
+// BOOL — when YES, the Turbo "Go Ad-Free" upsell banner on the Following tab
+// is hidden/collapsed on layout.
+extern NSString *const TWABKeyHideAdFreeButton;
+// BOOL — when YES, the Evolve "Live" feed's max-watch-time limit is
+// neutralized so a live preview keeps playing instead of stopping and
+// showing the Watch/Follow blocking overlay. Implemented by rewriting the
+// `maxStreamWatchSeconds` field in the FeedItems GraphQL response.
+extern NSString *const TWABKeyDisableWatchLimit;
 
 // Resolves which proxy address to use right now: the user's custom value
 // when the custom-proxy toggle is on, otherwise the bundled default.

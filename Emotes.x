@@ -361,6 +361,28 @@ static void twab_loadChannelEmotes(NSString *roomId) {
     });
 }
 
+// Clear every emote registry and re-fetch the global sets. Channel sets
+// re-load lazily on the next ROOMSTATE/PRIVMSG for each room (twab_injectIRCEmotes
+// calls twab_loadChannelEmotes on every PRIVMSG, and loadedRooms is now empty,
+// so the current channel repopulates within a message or two). Non-static so
+// the settings "Reload Emotes" action can call it. Safe from any thread —
+// all mutation happens under the emote queue's barrier.
+void twab_reloadEmotes(void) {
+    dispatch_barrier_async(twab_emoteQueue(), ^{
+        [twab_byWord() removeAllObjects];
+        [twab_byFakeId() removeAllObjects];
+        [twab_loadedRooms() removeAllObjects];
+        [twab_lruRooms() removeAllObjects];
+        [twab_roomFakeIds() removeAllObjects];
+        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] registry cleared by user reload");
+    });
+    // Re-fetch globals off the barrier — twab_loadGlobalEmotes only kicks off
+    // async URL tasks, and each registration takes its own barrier.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        twab_loadGlobalEmotes();
+    });
+}
+
 // ─── URL redirect ───────────────────────────────────────────────────────────
 
 // Single source of truth for the CDN URL format used by a given emote.

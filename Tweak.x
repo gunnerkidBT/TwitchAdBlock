@@ -589,14 +589,80 @@ static BOOL twab_tryHideStories(UIViewController *vc) {
 }
 %end
 
-// Log when a hooked Twitch/TwitchKit/Apollo class doesn't exist in the
-// running binary. Twitch renames Swift classes between versions and Logos
-// silently skips %hook blocks whose target class is absent; without this
-// warning, the corresponding feature just stops working with no signal.
-// Apple-private classes (__NSURLSession*) are not checked here because
-// they legitimately vary across iOS versions.
-static void twab_warnIfClassMissing(const char *name) {
-  if (!objc_getClass(name)) {
+// Hide the "Go Ad-Free" Turbo upsell banner on the Following tab.
+// FollowingViewController owns it via the `turboUpsellView` /
+// `turboUpsellViewController` ivars (confirmed in the 29.9 binary, alongside
+// the "Following upsell button tapped" event). presentTurboUpsell is a
+// non-@objc Swift method so it can't be hooked directly; instead we hide the
+// view on each layout pass — idempotent (once hidden it short-circuits) and
+// resilient to Twitch re-adding it. Mirrors the Stories-removal approach.
+static void twab_collapseUpsellView(UIView *v) {
+  if (!v || v.hidden) return;
+  v.hidden = YES;
+  static char collapsedKey;
+  if (!objc_getAssociatedObject(v, &collapsedKey)) {
+    NSLayoutConstraint *zero = [v.heightAnchor constraintEqualToConstant:0];
+    zero.priority = UILayoutPriorityRequired;
+    zero.active = YES;
+    objc_setAssociatedObject(v, &collapsedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+}
+
+static void twab_hideFollowingUpsell(id vc) {
+  // Known banner ivar first.
+  Ivar viewIv = twab_findIvar(vc, "turboUpsellView");
+  if (viewIv) {
+    id v = object_getIvar(vc, viewIv);
+    if ([v isKindOfClass:[UIView class]]) { twab_collapseUpsellView(v); return; }
+  }
+  // Child-VC variant — collapse its view if it's loaded.
+  Ivar vcIv = twab_findIvar(vc, "turboUpsellViewController");
+  if (vcIv) {
+    id child = object_getIvar(vc, vcIv);
+    if ([child isKindOfClass:[UIViewController class]]) {
+      UIView *cv = ((UIViewController *)child).viewIfLoaded;
+      if (cv) { twab_collapseUpsellView(cv); return; }
+    }
+  }
+  // Fallback — scan the view tree for any TurboUpsell* view.
+  UIView *found = twab_findSubviewMatching(((UIViewController *)vc).view, @"TurboUpsell");
+  if (found) twab_collapseUpsellView(found);
+}
+
+%hook _TtC6Twitch23FollowingViewController
+- (void)viewDidLayoutSubviews {
+  %orig;
+  if (![tweakDefaults boolForKey:TWABKeyHideAdFreeButton]) return;
+  twab_hideFollowingUpsell(self);
+}
+%end
+
+// Diagnostics registry. Records whether each hooked Twitch/TwitchKit/Apollo
+// class resolved in the running binary so the settings "Diagnostics" screen
+// can show what's wired vs. what Twitch renamed. Twitch renames Swift classes
+// between versions and Logos silently skips %hook blocks whose target class is
+// absent; without this, a broken feature gives no signal. Apple-private
+// classes (__NSURLSession*) are not tracked — they legitimately vary across
+// iOS versions. Populated once in %ctor; read by twab_classDiagnostics().
+static NSMutableArray<NSDictionary *> *twab_diagStore(void) {
+  static NSMutableArray *a;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ a = [NSMutableArray array]; });
+  return a;
+}
+
+// Public accessor for the settings UI. Returns a copy of
+// [{ @"name": NSString, @"present": @(BOOL) }, ...] in registration order.
+NSArray<NSDictionary *> *twab_classDiagnostics(void) {
+  return [twab_diagStore() copy];
+}
+
+// Record a class's presence (and warn to the log if missing). Replaces the
+// old twab_warnIfClassMissing — same logging, plus it feeds the registry.
+static void twab_checkClass(const char *name) {
+  BOOL present = objc_getClass(name) != nil;
+  [twab_diagStore() addObject:@{ @"name": @(name), @"present": @(present) }];
+  if (!present) {
     os_log_error(OS_LOG_DEFAULT,
         "[TWAB] missing hook target: %{public}s (Twitch likely renamed it)",
         name);
@@ -625,6 +691,10 @@ static void twab_warnIfClassMissing(const char *name) {
     [tweakDefaults setBool:YES forKey:TWABKeyAdBlockProxyEnabled];
   if (![tweakDefaults objectForKey:TWABKeyAdBlockCustomProxyEnabled])
     [tweakDefaults setBool:NO forKey:TWABKeyAdBlockCustomProxyEnabled];
+  if (![tweakDefaults objectForKey:TWABKeyDisableWatchLimit])
+    [tweakDefaults setBool:YES forKey:TWABKeyDisableWatchLimit];
+  if (![tweakDefaults objectForKey:TWABKeyHideAdFreeButton])
+    [tweakDefaults setBool:YES forKey:TWABKeyHideAdFreeButton];
   // Emote default lives here (not in Emotes.x's %ctor) because Logos
   // doesn't guarantee inter-file %ctor ordering — Emotes.x's %ctor
   // could run before Tweak.x's, when `tweakDefaults` is still nil, and
@@ -643,18 +713,26 @@ static void twab_warnIfClassMissing(const char *name) {
   }
   assetResourceLoaderDelegate = [[TWAdBlockAssetResourceLoaderDelegate alloc] init];
 
-  // Surface silently-skipped %hook blocks. Either of the two URLSession
-  // client classes is enough — Twitch ships one or the other per version.
-  twab_warnIfClassMissing("_TtC6Twitch25AccountMenuViewController");
-  twab_warnIfClassMissing("_TtC6Twitch23FollowingViewController");
-  twab_warnIfClassMissing("_TtC6Twitch27HeadlinerFollowingAdManager");
-  twab_warnIfClassMissing("TWAppUpdatePrompt");
-  twab_warnIfClassMissing("_TtC6Twitch16TabBarController");
-  twab_warnIfClassMissing("_TtC6Twitch20BrowseViewController");
-  twab_warnIfClassMissing("_TtC6Twitch30DiscoveryFeedTabViewController");
-  twab_warnIfClassMissing("_TtC6Twitch41DiscoveryFeedShelfContainerViewController");
-  if (!objc_getClass("_TtC9TwitchKit18TKURLSessionClient") &&
-      !objc_getClass("_TtC6Apollo16URLSessionClient")) {
+  // Surface silently-skipped %hook blocks into the diagnostics registry.
+  twab_checkClass("_TtC6Twitch25AccountMenuViewController");
+  twab_checkClass("_TtC6Twitch23FollowingViewController");
+  twab_checkClass("_TtC6Twitch27HeadlinerFollowingAdManager");
+  twab_checkClass("TWAppUpdatePrompt");
+  twab_checkClass("_TtC6Twitch16TabBarController");
+  twab_checkClass("_TtC6Twitch20BrowseViewController");
+  twab_checkClass("_TtC6Twitch30DiscoveryFeedTabViewController");
+  twab_checkClass("_TtC6Twitch41DiscoveryFeedShelfContainerViewController");
+  // Evolve "Live" feed VC — not hooked today, but its presence confirms the
+  // feed whose max-watchtime limit we neutralize and where feed display ads
+  // live (candidate ivar for a future block: adStateManager).
+  twab_checkClass("_TtC6Twitch24EvolveFeedViewController");
+  // Either of the two URLSession client classes is enough — Twitch ships one
+  // or the other per version. Record as a single combined entry.
+  BOOL urlClientPresent = objc_getClass("_TtC9TwitchKit18TKURLSessionClient") ||
+                          objc_getClass("_TtC6Apollo16URLSessionClient");
+  [twab_diagStore() addObject:@{ @"name": @"URLSessionClient (TK or Apollo)",
+                                 @"present": @(urlClientPresent) }];
+  if (!urlClientPresent) {
     os_log_error(OS_LOG_DEFAULT,
         "[TWAB] missing hook target: neither TKURLSessionClient nor Apollo.URLSessionClient");
   }
