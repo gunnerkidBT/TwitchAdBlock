@@ -1,120 +1,119 @@
 # TwitchAdBlock (Unofficial Fork)
 
-> **This is not my project.** The original TwitchAdBlock was created by [level3tjg](https://github.com/level3tjg/TwitchAdBlock). All credit for the original concept, architecture, and implementation goes to them. This fork exists solely to maintain compatibility with newer versions of Twitch and iOS.
+> **This isn't my original project.** TwitchAdBlock was created by
+> [level3tjg](https://github.com/level3tjg/TwitchAdBlock) — all credit for the
+> original idea and work goes to them. This fork just keeps it working on newer
+> versions of Twitch and iOS, and adds a few extra options. Please **don't**
+> report issues with this fork to the original author.
+>
+> The changes here were made with the help of Claude (Anthropic AI); I'm not an
+> iOS developer.
 
-> **The modifications in this fork were made with the assistance of Claude (Anthropic AI).** I am not an iOS developer. Do not report issues in this fork to the original author.
-
----
-
-## Features
-
-### Ad blocking
-- **Live stream preroll ad blocking** via proxy — either V2 / ttv-lol-pro–compatible (URL rewrite + Basic auth) or standard HTTP CONNECT tunneling
-- **VOD preroll ad blocking** via the same proxy path
-- **GraphQL-level ad stripping** — removes `OfferPromotion` (McDonald's-style brand banners), `PromotionDisplay`, `BitsProductPromotion` ("buy Bits" prompt), and `FeedAd` (Following-feed ad cards)
-- **Recursive ad-typename diagnostic** — surfaces unknown `Ad` / `Promot` / `Sponsor` / `Headliner` typenames so new ad surfaces can be added to the blocklist quickly
-- **Ad-host hard block** — `edge.ads.twitch.tv`, `spade.twitch.tv`, `*.amazon-adsystem.com`, and Nielsen domains return nil tasks immediately
-- **Bundled default proxy** — works out of the box without configuration (V1-compatible)
-- **Custom proxy support** — `user:pass@host:port` format with Basic auth automatically injected
-- **Multi-proxy fallback list** — reorderable list of proxies tried in order; first to ping/200 wins for V2 rewrite, first parseable used for CONNECT fallback
-- **Subscriber / Turbo bypass** — token-aware skip when the user is ad-exempt (avoids exposing their auth token to the proxy)
-- **Live proxy reachability status** — `● Online` / `● Offline` indicator with raw TCP probe
-- **Per-proxy ping verdict cache** — multi-proxy lists don't re-ping every entry on every request
-
-### Chat
-- **7TV emote rendering** in chat — globals + per-channel sets
-- **BetterTTV emote rendering** in chat — globals + per-channel sets
-- **FrankerFaceZ emote rendering** in chat — globals + per-channel sets
-- **LRU emote cache** — bounded to 50 rooms; oldest emotes evicted, globals never expire
-- **Grapheme-cluster–accurate emote position math** for IRC `emotes=` tag offsets
-
-### App customization
-- **Launch Screen picker** — choose what tab Twitch opens to (Home → Following / Live / Clips, Browse → Categories / Live Channels, Activity, Profile, or Twitch's default)
-- **Hide Twitch Stories** — removes the horizontal Stories strip at the top of the Home tab
-- **TwitchMods account-menu entry** — bold themed cell with leading icon, opens the settings screen
-
-### Compatibility
-- **Twitch 29.x** — handles renamed GraphQL operations + Apollo batched-array request shape
-- **iOS 26** — works around `___isOSVersionAtLeast` resolution failure and `UIListContentConfiguration` requirements
-- **Sideloaded / no jailbreak / no Substrate** — `inject_ipa.py` handles dylib injection + ATS bypass; settings VC built without Logos `%subclass`
+In the app, this shows up as **"TwitchMods"** — open it from the row in your
+account menu, where every feature below has its own on/off switch.
 
 ---
 
-## What changed
+## What it does
 
-This fork fixes several issues that broke TwitchAdBlock on **Twitch 29.x** and **iOS 26** when sideloaded (no jailbreak / no Substrate):
+A modified Twitch iOS app that blocks ads and adds some handy extras.
 
-- **Settings crash fixed** — The settings screen crashed on tap (`PC=0`) because `@available(iOS 13, *)` compiles to a runtime symbol (`___isOSVersionAtLeast`) that is unresolvable in sideloaded dylibs. Replaced with `NSProcessInfo` runtime checks.
-- **Settings labels now visible** — iOS 26 ignores `UITableViewCell.textLabel`. Switched to `UIListContentConfiguration` with a fallback for older OS versions.
-- **Proxy address field now visible** — The custom proxy text field had a broken frame-based layout (width calculated as 0 at cell creation time). Replaced with Auto Layout constraints.
-- **Ad blocking fixed for Twitch 29.x** — Twitch renamed the GraphQL operation (`StreamAccessToken` → `PlaybackAccessToken`), moved the platform field (`variables.params.platform` → `variables.playerType`), and switched to Apollo batched requests (JSON arrays). Updated `NSData+TwitchAdBlock` to handle all of these.
-- **Authenticated proxy support** — Added support for `user:pass@host:port` proxy format with proper HTTP proxy authentication via `NSURLAuthenticationMethodHTTPProxy`.
-- **Settings refactored** — Replaced the Logos `%subclass` settings view controller with a plain Objective-C class (`TWABSettingsVC`) to avoid Logos registration failures in sideloaded dylibs.
+### Blocks ads
+- Skips the unskippable pre-roll ads before **live streams** and **recorded
+  videos (VODs)** by routing through an ad-free-country proxy.
+- Clears ad banners and prompts out of the feeds — brand offers, the "buy Bits"
+  prompt, sponsor spots, and the Following-tab **"Go Ad-Free"** Turbo button.
+- Works out of the box with a built-in proxy, or you can add your own (including
+  a list of backups it tries in order).
+- Skips the proxy automatically if you already have a subscription or Turbo —
+  you're already ad-free, and it keeps your account details private.
 
-See [CHANGELOG.md](CHANGELOG.md) for full details.
+### Chat emotes
+- Shows **7TV**, **BetterTTV**, and **FrankerFaceZ** emotes right in chat, both
+  global and per-channel.
+- A **Reload Emotes** button to refresh them if a streamer adds new ones while
+  you're watching.
+
+### Make the app yours
+- **Keep Live Feed Playing** — stops the Live feed cutting a stream off and
+  forcing you to tap Watch or Follow.
+- **Pick your launch screen** — open straight to Following, Live, Clips, Browse,
+  and more, instead of Twitch's default.
+- **Hide Twitch Stories** — removes the Stories bar at the top of the Home tab.
+- Clearer settings — a short description under each option, grouped under
+  headings.
+
+### Extras
+- **Back up & restore** all your settings to a file (handy when you reinstall).
+- **Diagnostics** screen — a quick green/red check that everything still works
+  after a Twitch update.
+
+For a plain-language list of everything that's changed, see
+[CHANGELOG.md](CHANGELOG.md).
 
 ---
 
-## Building from source
+## Why this fork exists
 
-### Requirements
+The original stopped working on recent Twitch and iOS versions when sideloaded
+(no jailbreak). This fork fixes that, keeps it up to date with new Twitch
+releases, and adds the extras above.
 
-- Windows 10/11 with WSL (Ubuntu) — or any Linux/macOS machine
-- [Theos](https://theos.dev/docs/installation) installed in WSL at `~/theos`
-- A **decrypted** Twitch IPA (the App Store IPA is encrypted and cannot be patched)
+---
+
+## Building it yourself
+
+You only need this if you want to compile from source. Otherwise grab a
+prebuilt IPA from the [Releases](https://github.com/gunnerkidBT/TwitchAdBlock/releases)
+page and jump to **Install**.
+
+**You'll need**
+
+- Windows with WSL (Ubuntu), or any Linux/macOS machine
+- [Theos](https://theos.dev/docs/installation) installed at `~/theos`
+- A **decrypted** Twitch IPA (the App Store version is encrypted and can't be
+  patched)
 - Python 3
 
-### 1. Install Theos (first time only)
+**Steps**
 
-Open WSL and run:
+1. Install Theos (first time only):
 
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
-```
+   ```bash
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+   ```
 
-### 2. Clone this repo
+2. Clone and build:
 
-```bash
-git clone https://github.com/gunnerkidBT/TwitchAdBlock.git
-cd TwitchAdBlock
-git submodule update --init --recursive
-```
+   ```bash
+   git clone https://github.com/gunnerkidBT/TwitchAdBlock.git
+   cd TwitchAdBlock
+   git submodule update --init --recursive
+   export THEOS=~/theos
+   make SIDELOADED=1
+   ```
 
-### 3. Build the dylib
+3. Inject the built tweak into your decrypted IPA:
 
-```bash
-export THEOS=~/theos
-export PATH=$THEOS/bin:$PATH
-make SIDELOADED=1
-```
+   ```bash
+   python3 inject_ipa.py /path/to/Twitch-decrypted.ipa \
+       .theos/obj/debug/TwitchAdBlock.dylib \
+       Twitch-patched.ipa
+   ```
 
-The compiled dylib will be at `.theos/obj/debug/TwitchAdBlock.dylib`.
+   (This drops the tweak into the app and lets it load plain-HTTP proxy traffic.)
 
-### 4. Inject into the IPA
-
-```bash
-python3 inject_ipa.py /path/to/Twitch-decrypted.ipa \
-    .theos/obj/debug/TwitchAdBlock.dylib \
-    Twitch-patched.ipa
-```
-
-> `inject_ipa.py` lives at the repo root. It does three things: copies the dylib into `Payload/Twitch.app/Frameworks/`, injects an `LC_LOAD_DYLIB` load command into the Twitch Mach-O binary, and patches `NSAppTransportSecurity.NSAllowsArbitraryLoads = true` into `Info.plist` so plain-HTTP proxy traffic isn't blocked by iOS ATS.
-
-### 5. Install
+**Install**
 
 | Method | Steps |
 |--------|-------|
-| **TrollStore** | Open TrollStore → tap `+` → select the patched IPA |
-| **AltStore / SideStore** | Drag the patched IPA into the app to sideload and sign |
-
-> **A note on CI builds**: The `.github/workflows/build.yml` workflow can in principle build an IPA via `workflow_dispatch` with `create_release=true`, but the IPA-download step depends on **decryptedappstore.com** which is currently unreachable. Until that's resolved, IPA builds are local-only.
+| **TrollStore** | Open TrollStore → tap `+` → pick the patched IPA |
+| **AltStore / SideStore** | Drag the patched IPA into the app to install and sign |
 
 ---
 
-## Original project
+## Credits & license
 
-- **Author:** [level3tjg](https://github.com/level3tjg)
-- **Source:** https://github.com/level3tjg/TwitchAdBlock
-- **License:** MIT
-
-This fork is also released under the MIT license in keeping with the original. See [LICENSE](LICENSE).
+- Original project by [level3tjg](https://github.com/level3tjg) —
+  <https://github.com/level3tjg/TwitchAdBlock>
+- Released under the MIT license, same as the original. See [LICENSE](LICENSE).
