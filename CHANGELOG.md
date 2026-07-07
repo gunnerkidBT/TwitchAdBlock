@@ -5,6 +5,14 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## July 7, 2026 — Works with Twitch 30.2
+
+Updated to run on the latest Twitch app (**30.2**). No feature changes — just
+making sure everything keeps working after Twitch's update. (Same v0.1.12
+features as below.)
+
+---
+
 ## v0.1.12 — June 25, 2026
 
 **The Live tab keeps playing now.** It used to stop the stream after a while
