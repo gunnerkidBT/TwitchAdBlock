@@ -40,6 +40,7 @@
 extern BOOL twab_isAdHost(NSString *host);
 extern BOOL twab_isPlaylistHost(NSString *host);
 extern BOOL twab_isMasterPlaylistHost(NSString *host);
+extern BOOL twab_isExternalPlayback(void);  // Cast/AirPlay — skip proxy rewrite
 
 extern NSUserDefaults *tweakDefaults;
 
@@ -546,7 +547,7 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
             "[TWAB-URL] master playlist seen host=%{public}@ adBlock=%d proxyEnabled=%d proxies=%lu",
             request.URL.host, adBlockOn, proxyEnabled, (unsigned long)proxyAddrs.count);
 
-        if (adBlockOn && proxyEnabled && proxyAddrs.count) {
+        if (adBlockOn && proxyEnabled && proxyAddrs.count && !twab_isExternalPlayback()) {
             if (twab_userIsAdExempt(request.URL.query)) {
                 os_log(OS_LOG_DEFAULT,
                     "[TWAB-URL] subscriber/turbo detected — skipping proxy host=%{public}@",

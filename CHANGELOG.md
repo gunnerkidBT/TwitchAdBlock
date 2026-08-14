@@ -5,6 +5,19 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.13 — August 13, 2026
+
+**Casting and AirPlay to a TV now work with ad-blocking on.** Before, having the
+ad-block proxy turned on could make casting to a Chromecast crash after a few
+seconds, or make AirPlay to an Apple TV show "offline." Now the mod
+automatically steps aside while you're actually casting or AirPlaying, so the
+stream plays on the TV normally — and your phone goes right back to blocking ads
+the moment you stop. (The stream playing *on the TV* still shows ads — that part
+can't be blocked, since the TV fetches the video itself — but your phone stays
+ad-free.)
+
+---
+
 ## August 11, 2026 — Works with Twitch 30.7
 
 Updated to run on the latest Twitch app (**30.7**). No feature changes — just

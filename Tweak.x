@@ -1,6 +1,8 @@
 #import <dlfcn.h>
 #import <os/log.h>
 #import <objc/message.h>
+#import <stdatomic.h>
+#import <AVFoundation/AVFoundation.h>
 #import "Tweak.h"
 #import "SettingsKeys.h"
 
@@ -54,6 +56,66 @@ BOOL twab_isMasterPlaylistHost(NSString *host) {
   return [host isEqualToString:@"usher.ttvnw.net"];
 }
 
+// ─── External-playback (Cast / AirPlay) detection ──────────────────────────
+//
+// When the stream goes to a TV (Chromecast or AirPlay video), the TV fetches
+// the URL itself — it can't reproduce our proxy rewrite (Luminous URL / Basic
+// auth / local twab: scheme), so a rewritten URL makes it crash or go
+// "offline". We therefore skip proxy rewriting only while external playback is
+// actually happening; normal phone viewing keeps full ad-blocking. (The cast
+// stream itself is unavoidably un-ad-blocked — we can't reach the TV's fetches.)
+//
+// IMPORTANT: "actively casting" means a Cast session with media LOADED and not
+// idle — NOT merely "connected". A connected session lingers after you stop
+// casting, and using that as the signal wrongly disabled the proxy during
+// normal viewing (the earlier regression). We go one level deeper:
+//   currentCastSession -> remoteMediaClient -> mediaStatus -> playerState
+// and require playerState to be non-idle. All via objc_msgSend so we don't link
+// GoogleCast; guarded by +isSharedInstanceInitialized so we never trip the SDK.
+static BOOL twab_isActivelyCasting(void) {
+  Class ctxCls = objc_getClass("GCKCastContext");
+  if (!ctxCls) return NO;
+  if ([ctxCls respondsToSelector:@selector(isSharedInstanceInitialized)] &&
+      !((BOOL (*)(id, SEL))objc_msgSend)(ctxCls, @selector(isSharedInstanceInitialized)))
+    return NO;
+  if (![ctxCls respondsToSelector:@selector(sharedInstance)]) return NO;
+  id ctx = ((id (*)(id, SEL))objc_msgSend)(ctxCls, @selector(sharedInstance));
+  if (![ctx respondsToSelector:@selector(sessionManager)]) return NO;
+  id mgr = ((id (*)(id, SEL))objc_msgSend)(ctx, @selector(sessionManager));
+  if (![mgr respondsToSelector:@selector(currentCastSession)]) return NO;
+  id session = ((id (*)(id, SEL))objc_msgSend)(mgr, @selector(currentCastSession));
+  if (!session || ![session respondsToSelector:@selector(remoteMediaClient)]) return NO;
+  id rmc = ((id (*)(id, SEL))objc_msgSend)(session, @selector(remoteMediaClient));
+  if (!rmc || ![rmc respondsToSelector:@selector(mediaStatus)]) return NO;
+  id status = ((id (*)(id, SEL))objc_msgSend)(rmc, @selector(mediaStatus));
+  if (!status) return NO;  // nothing loaded on the receiver → not actively casting
+  if (![status respondsToSelector:@selector(playerState)]) return YES;
+  NSInteger ps = ((NSInteger (*)(id, SEL))objc_msgSend)(status, @selector(playerState));
+  return ps != 0 && ps != 1;  // GCKMediaPlayerState: 0 Unknown, 1 Idle → not active
+}
+
+// AirPlay: audio routed to an AirPlay output. Covers AirPlay video (the case
+// that breaks); also true during screen mirroring, where skipping the proxy is
+// unnecessary but harmless (that mirrored stream just isn't ad-blocked).
+static BOOL twab_isAirPlaying(void) {
+  AVAudioSession *s = [AVAudioSession sharedInstance];
+  for (AVAudioSessionPortDescription *o in s.currentRoute.outputs)
+    if ([o.portType isEqualToString:AVAudioSessionPortAirPlay]) return YES;
+  return NO;
+}
+
+// Skip the proxy while the stream is on an external device. Logs only when it
+// actually skips (rare — external playback only), matching the proxy-debug
+// logging style. Non-static so Emotes.x's __NSURLSessionLocal hook can use it.
+BOOL twab_isExternalPlayback(void) {
+  BOOL cast = twab_isActivelyCasting();
+  BOOL air = cast ? NO : twab_isAirPlaying();
+  if (cast || air)
+    os_log(OS_LOG_DEFAULT,
+        "[TWAB-Ext] external playback (cast=%d airplay=%d) — skipping proxy", cast, air);
+  return cast || air;
+}
+
 // Server-side video ad blocking
 
 %hook NSURLSession
@@ -76,6 +138,7 @@ BOOL twab_isMasterPlaylistHost(NSString *host) {
   ((NSMutableURLRequest *)request).HTTPBody = [request.HTTPBody twab_requestDataForRequest:request];
   if (![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled]) return %orig;
   if (!twab_isMasterPlaylistHost(request.URL.host)) return %orig;
+  if (twab_isExternalPlayback()) return %orig;  // Cast/AirPlay — send a clean URL
   // V2 URL rewrite only on this shadowed public hook (video traffic goes
   // through __NSURLSessionLocal in Emotes.x which has the richer routing
   // logic including CONNECT fallback + subscriber bypass). Try each
@@ -102,6 +165,7 @@ BOOL twab_isMasterPlaylistHost(NSString *host) {
   bodyData = [bodyData twab_requestDataForRequest:request];
   if (![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled]) return %orig;
   if (!twab_isMasterPlaylistHost(request.URL.host)) return %orig;
+  if (twab_isExternalPlayback()) return %orig;  // Cast/AirPlay — send a clean URL
   for (NSString *proxyAddr in twab_effectiveProxyAddresses()) {
     NSURL *proxyURL = twab_normalizedProxyURL(proxyAddr);
     if (!proxyURL) continue;
@@ -129,6 +193,9 @@ BOOL twab_isMasterPlaylistHost(NSString *host) {
       ![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled] ||
       ![URL.scheme isEqualToString:@"https"] || !twab_isPlaylistHost(URL.host))
     return %orig;
+  // While casting / AirPlaying, don't rewrite — the TV can't reproduce the
+  // proxy URL / twab: scheme. Send a clean, playable URL instead.
+  if (twab_isExternalPlayback()) return %orig;
   // Only the master playlist host (usher.ttvnw.net) can be V2-rewritten.
   // Variant playlists + segments fall through to the AVAssetResourceLoaderDelegate
   // path below, which proxies them via its own NSURLSession. Try each
