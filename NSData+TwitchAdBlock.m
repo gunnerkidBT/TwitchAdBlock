@@ -159,31 +159,116 @@ static void twab_processTree(id obj, NSSet *arraySet, NSSet *fieldSet,
 // The Evolve "Live" feed stops a preview after `watchBehavior.maxStreamWatchSeconds`
 // and shows the EvolveFeedMaxWatchtimeOverlayView (the Watch/Follow blocking
 // overlay). Rewriting that value to an effectively-infinite number means the
-// countdown bar never depletes within a session, so playback continues. We set
-// a large value rather than deleting the key so any `if let max = ...`
-// breakpoint logic still gets a (huge) number instead of treating nil as a
-// different default. INT_MAX seconds ≈ 68 years. Sets *dirty=YES on change.
+// countdown bar never depletes within a session, so playback continues (1,000,000
+// seconds, see below for why not INT_MAX). Sets *dirty=YES on change.
+//
+// SCOPED to the Evolve feed only. The Following "Live Now" list shares the SAME
+// FeedItemsQuery, and its `feedItems` object also carries watchBehavior — but it
+// has no watch limit. Rewriting it there changed every paginated Following page,
+// which made Apollo re-render the whole list and snap the user's scroll to the
+// top (reported bug). Both feeds request the `isEvolveFeed` flag, so we skip any
+// feedItems object where it's explicitly false — leaving the Following response
+// byte-identical while still neutralizing the real Evolve feed.
 static void twab_neutralizeWatchLimits(id obj, BOOL *dirty) {
     if ([obj isKindOfClass:NSMutableDictionary.class]) {
         NSMutableDictionary *d = obj;
-        for (NSString *key in [d allKeys]) {
-            id val = d[key];
-            if ([key isEqualToString:@"maxStreamWatchSeconds"] &&
-                [val isKindOfClass:NSNumber.class]) {
-                NSNumber *capped = @(2147483647);
-                if (![val isEqual:capped]) {
-                    d[key] = capped;
-                    *dirty = YES;
-                    os_log(OS_LOG_DEFAULT,
-                        "[TWAB-Watch] neutralized maxStreamWatchSeconds (was %{public}@)", val);
-                }
-                continue;
+        // A feedItems object: has watchBehavior. Only rewrite it when this isn't
+        // explicitly the Following (non-Evolve) feed.
+        id wb = d[@"watchBehavior"];
+        if ([wb isKindOfClass:NSMutableDictionary.class]) {
+            id evolve = d[@"isEvolveFeed"];
+            BOOL isFollowingFeed = [evolve isKindOfClass:NSNumber.class] && ![evolve boolValue];
+            // 31.x's Live feed is React Native, which turns this into a
+            // JavaScript timer in milliseconds. The old INT_MAX seconds
+            // overflowed JS's maximum timer delay (2^31-1 ms ≈ 24.8 days) —
+            // and an overflowed timer fires immediately, so the "infinite"
+            // limit cut streams off instead. 1,000,000 s (≈11.5 days) is
+            // 1e9 ms: effectively unlimited, and safe for both native and JS.
+            NSNumber *capped = @(1000000);
+            for (NSString *key in @[@"maxStreamWatchSeconds", @"maxWatchSeconds"]) {
+                id secs = ((NSMutableDictionary *)wb)[key];
+                if (isFollowingFeed || ![secs isKindOfClass:NSNumber.class]) continue;
+                if ([secs isEqual:capped]) continue;
+                ((NSMutableDictionary *)wb)[key] = capped;
+                *dirty = YES;
+                os_log(OS_LOG_DEFAULT,
+                    "[TWAB-Watch] neutralized %{public}@ (was %{public}@)", key, secs);
             }
-            twab_neutralizeWatchLimits(val, dirty);
         }
+        for (NSString *key in d) twab_neutralizeWatchLimits(d[key], dirty);
     } else if ([obj isKindOfClass:NSMutableArray.class]) {
         for (id val in (NSMutableArray *)obj) twab_neutralizeWatchLimits(val, dirty);
     }
+}
+
+// Hide Stories, data side. The Stories shelf at the top of Home is fed by one
+// GraphQL query — StoryPreviewsWithOrder (native Home) or StoryShelfPreviews
+// (React Native Home, Twitch 31.x) — both returning storyPreviewsWithOrder.
+// Emptying its previews works no matter which Home implementation renders the
+// shelf (the native view-removal in Tweak.x can't see a React Native shelf).
+// Matched by operation name, NOT by field: RecapsPreviews uses the same
+// storyPreviewsWithOrder field for Recaps and must be left alone.
+static BOOL twab_isStoryShelfOperation(NSString *opName) {
+    return [opName isEqualToString:@"StoryShelfPreviews"] ||
+           [opName isEqualToString:@"StoryPreviewsWithOrder"];
+}
+
+static void twab_emptyStoryShelf(NSMutableDictionary *data, BOOL *dirty) {
+    NSMutableDictionary *shelf = data[@"storyPreviewsWithOrder"];
+    if (![shelf isKindOfClass:NSMutableDictionary.class]) return;
+    for (NSString *key in [shelf allKeys]) {
+        id val = shelf[key];
+        if ([val isKindOfClass:NSArray.class] && [(NSArray *)val count]) {
+            shelf[key] = [NSMutableArray array];   // previews (and any other lists)
+            *dirty = YES;
+        } else if ([key isEqualToString:@"creatorSelfPreview"] && val && val != (id)kCFNull) {
+            shelf[key] = (id)kCFNull;               // native: your own story bubble
+            *dirty = YES;
+        } else if ([key isEqualToString:@"hasNextPage"] && [val isEqual:@YES]) {
+            shelf[key] = @NO;
+            *dirty = YES;
+        }
+    }
+    if (*dirty) os_log(OS_LOG_DEFAULT, "[TWAB-Stories] emptied Stories shelf response");
+}
+
+// The stronger lever: StoriesViewAccess / StoriesCreationAccess return the
+// account's story eligibilities, which decide whether the Stories shelf (and
+// the "add your story" bubble) is shown at all. Emptying them hides the shelf
+// even when the React Native Apollo cache still holds old previews — the
+// paginated previews list merges, so an empty StoryShelfPreviews alone doesn't
+// clear what's cached; these plain arrays overwrite on every fetch.
+static BOOL twab_isStoryAccessOperation(NSString *opName) {
+    return [opName isEqualToString:@"StoriesViewAccess"] ||
+           [opName isEqualToString:@"StoriesCreationAccess"];
+}
+
+static void twab_denyStoryAccess(NSMutableDictionary *data, NSString *opName, BOOL *dirty) {
+    for (NSString *key in [data allKeys]) {
+        NSMutableDictionary *access = data[key];
+        if (![access isKindOfClass:NSMutableDictionary.class]) continue;
+        NSArray *elig = access[@"eligibilities"];
+        if ([elig isKindOfClass:NSArray.class] && elig.count) {
+            os_log(OS_LOG_DEFAULT, "[TWAB-Stories] %{public}@: cleared eligibilities %{public}@",
+                   opName, [elig componentsJoinedByString:@","]);
+            access[@"eligibilities"] = [NSMutableArray array];
+            *dirty = YES;
+        }
+    }
+}
+
+// Operation name for a response element: Twitch echoes it in
+// extensions.operationName; fall back to the matching request op (batched
+// requests and responses are index-aligned).
+static NSString *twab_responseOperationName(NSDictionary *op, NSURLRequest *request, NSUInteger index) {
+    NSString *name = op[@"extensions"][@"operationName"];
+    if ([name isKindOfClass:NSString.class]) return name;
+    if (!request.HTTPBody) return nil;
+    id req = [NSJSONSerialization JSONObjectWithData:request.HTTPBody options:0 error:nil];
+    NSArray *reqOps = [req isKindOfClass:NSArray.class] ? req : (req ? @[req] : @[]);
+    NSDictionary *reqOp = index < reqOps.count ? reqOps[index] : nil;
+    name = [reqOp isKindOfClass:NSDictionary.class] ? reqOp[@"operationName"] : nil;
+    return [name isKindOfClass:NSString.class] ? name : nil;
 }
 
 static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
@@ -191,12 +276,16 @@ static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
     NSString *query  = op[@"query"];
     NSString *spoof  = [NSUUID UUID].UUIDString;
 
+    // 31.x's React Native player names its operations StreamAccessTokenQuery /
+    // VodAccessTokenQuery / PrefetchPlaybackAccessToken; match by prefix so a
+    // hash-only (no query text) request is still caught.
     BOOL isStream = [opName isEqualToString:@"PlaybackAccessToken"] ||
                     [opName isEqualToString:@"PlaybackAccessToken_Template"] ||
-                    [opName isEqualToString:@"StreamAccessToken"] ||
+                    [opName hasPrefix:@"StreamAccessToken"] ||
+                    [opName isEqualToString:@"PrefetchPlaybackAccessToken"] ||
                     [query containsString:@"PlaybackAccessToken"] ||
                     [query containsString:@"StreamAccessToken"];
-    BOOL isVod    = [opName isEqualToString:@"VodAccessToken"];
+    BOOL isVod    = [opName hasPrefix:@"VodAccessToken"];
     BOOL isClip   = [opName isEqualToString:@"ClipAccessToken"];
 
     if (isStream || isVod) {
@@ -205,6 +294,9 @@ static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
         // 29.x: playerType at top level of variables
         if (vars[@"playerType"])
             vars[@"playerType"] = spoof;
+        // 31.x PrefetchPlaybackAccessToken: platform at top level too
+        if (vars[@"platform"])
+            vars[@"platform"] = spoof;
         // pre-29.x: platform nested under params
         NSMutableDictionary *params = vars[@"params"];
         if ([params isKindOfClass:NSMutableDictionary.class] && params[@"platform"])
@@ -265,13 +357,26 @@ static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
     // is sensitive to byte-level differences, which broke Clips).
     NSSet *arraySet = twab_arrayAdTypenames();
     NSSet *fieldSet = twab_fieldAdTypenames();
-    BOOL stripWatchLimit = [tweakDefaults boolForKey:TWABKeyDisableWatchLimit];
+    // Ad stripping + watch limit ride on the ad-block toggle; Hide Stories is
+    // independent of it.
+    BOOL adBlock = [tweakDefaults boolForKey:TWABKeyAdBlockEnabled];
+    BOOL stripWatchLimit = adBlock && [tweakDefaults boolForKey:TWABKeyDisableWatchLimit];
+    BOOL hideStories = [tweakDefaults boolForKey:TWABKeyHideStories];
+    if (!adBlock && !hideStories) return self;
     BOOL dirty = NO;
     NSArray *ops = [json isKindOfClass:NSMutableArray.class] ? json : @[json];
-    for (NSMutableDictionary *op in ops) {
+    for (NSUInteger i = 0; i < ops.count; i++) {
+        NSMutableDictionary *op = ops[i];
         if (![op isKindOfClass:NSMutableDictionary.class]) continue;
-        twab_processTree(op[@"data"], arraySet, fieldSet, op[@"operationName"], &dirty);
+        if (adBlock) twab_processTree(op[@"data"], arraySet, fieldSet, op[@"operationName"], &dirty);
         if (stripWatchLimit) twab_neutralizeWatchLimits(op[@"data"], &dirty);
+        if (hideStories) {
+            NSString *opName = twab_responseOperationName(op, request, i);
+            if ([op[@"data"] isKindOfClass:NSMutableDictionary.class] && twab_isStoryShelfOperation(opName))
+                twab_emptyStoryShelf(op[@"data"], &dirty);
+            if ([op[@"data"] isKindOfClass:NSMutableDictionary.class] && twab_isStoryAccessOperation(opName))
+                twab_denyStoryAccess(op[@"data"], opName, &dirty);
+        }
     }
     if (!dirty) return self;
     NSData *out = [NSJSONSerialization dataWithJSONObject:json options:0 error:&error];

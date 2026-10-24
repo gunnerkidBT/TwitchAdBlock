@@ -10,6 +10,7 @@ extern void twab_reloadEmotes(void);
 // Tweak.x — [{ @"name": NSString, @"present": @(BOOL) }, ...] for the
 // hooked Twitch classes, recorded at launch.
 extern NSArray<NSDictionary *> *twab_classDiagnostics(void);
+extern NSArray<NSString *> *twab_pickerDiagnostics(void);
 
 #define LOC(x, d) (tweakBundle ? [tweakBundle localizedStringForKey:x value:d table:nil] : (d))
 
@@ -21,11 +22,13 @@ extern NSArray<NSDictionary *> *twab_classDiagnostics(void);
 
 @implementation TWABDiagnosticsVC {
     NSArray<NSDictionary *> *_items;
+    NSArray<NSString *> *_pickerLines;
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = LOC(@"settings.diag.title", @"Diagnostics");
     _items = twab_classDiagnostics() ?: @[];
+    _pickerLines = twab_pickerDiagnostics() ?: @[];
     // Only show "Done" when we're the root of a presented nav controller
     // (settings had no nav, so showDiagnostics wrapped + presented us). When
     // pushed onto an existing nav stack, the back button handles dismissal —
@@ -40,11 +43,21 @@ extern NSArray<NSDictionary *> *twab_classDiagnostics(void);
     }
 }
 - (void)twabDone { [self dismissViewControllerAnimated:YES completion:nil]; }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return 1; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return 2; }
 - (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s {
-    return (NSInteger)_items.count;
+    return (NSInteger)(s == 0 ? _items.count : _pickerLines.count);
 }
 - (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip {
+    if (ip.section == 1) {
+        UITableViewCell *cell = [t dequeueReusableCellWithIdentifier:@"picker"];
+        if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                                 reuseIdentifier:@"picker"];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.text = _pickerLines[ip.row];
+        cell.textLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+        cell.textLabel.numberOfLines = 0;
+        return cell;
+    }
     UITableViewCell *cell = [t dequeueReusableCellWithIdentifier:@"diag"];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
                                              reuseIdentifier:@"diag"];
@@ -73,9 +86,11 @@ extern NSArray<NSDictionary *> *twab_classDiagnostics(void);
     return cell;
 }
 - (NSString *)tableView:(UITableView *)t titleForHeaderInSection:(NSInteger)s {
+    if (s == 1) return @"Emote picker (open chat first)";
     return LOC(@"settings.diag.header", @"Hooked Twitch classes (this build)");
 }
 - (NSString *)tableView:(UITableView *)t titleForFooterInSection:(NSInteger)s {
+    if (s == 1) return nil;
     return LOC(@"settings.diag.footer",
         @"✓ = the class resolved and its hook is active. ✗ = Twitch renamed or "
         @"removed it, so that feature is inactive until the hook is updated.");
@@ -171,7 +186,7 @@ extern NSArray<NSDictionary *> *twab_classDiagnostics(void);
 // Section layout:
 //   0: Ad Block toggle           (always shown)
 //   1: Proxy + custom proxy      (only when ad block is on)
-//   2: Emotes toggle + reload    (always shown)
+//   2: Emotes toggle + hide 7TV bar + reload    (always shown)
 //   3: Home: launch / stories / keep-live-feed
 //   4: Tools: export / import / diagnostics
 //   5: empty / version footer    (always shown — last section)
@@ -214,7 +229,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
             // proxy switch + custom switch + (custom-only: N proxy rows
             // + "Add proxy" row) + status
             return self.customProxyEnabled ? (3 + (NSInteger)self.proxies.count + 1) : 3;
-        case 2: return 2;  // emotes toggle + reload-emotes action
+        case 2: return 3;  // emotes toggle + hide-7TV-button toggle + reload-emotes action
         case 3: return 3;  // launch dropdown + hide-stories toggle + watch-limit toggle
         case 4: return 3;  // Tools: export, import, diagnostics
         case 5: return 0;  // version footer only
@@ -314,6 +329,14 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                              on:_emotesEnabled
                                          action:@selector(emotesSwitchChanged:)
                                      identifier:@"EmotesSwitch"];
+            if (indexPath.row == 1)
+                return [self switchCellWithTitle:LOC(@"settings.hidepickerbutton.title",
+                                                     @"Hide 7TV Bar")
+                                        subtitle:LOC(@"settings.hidepickerbutton.desc",
+                                                     @"Remove the 7TV bar above the keyboard when you type in chat (a 7TV button in older chat). Press and hold Twitch's emote button to open the 7TV picker instead.")
+                                             on:[tweakDefaults boolForKey:TWABKeyHidePickerButton]
+                                         action:@selector(hidePickerButtonSwitchChanged:)
+                                     identifier:@"HidePickerButtonSwitch"];
             return [self actionCellWithTitle:LOC(@"settings.emotes.reload", @"Reload Emotes")
                                     subtitle:LOC(@"settings.emotes.reload.desc",
                                                  @"Clear the cache and re-fetch all emote sets.")
@@ -404,7 +427,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                       withRowAnimation:UITableViewRowAnimationAutomatic];
         return;
     }
-    if (indexPath.section == 2 && indexPath.row == 1) {
+    if (indexPath.section == 2 && indexPath.row == 2) {
         [self reloadEmotesTapped:[tableView cellForRowAtIndexPath:indexPath]];
         return;
     }
@@ -852,6 +875,10 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     if (sw.on) [self refreshProxyStatus];
 }
 
+- (void)hidePickerButtonSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHidePickerButton];
+}
+
 - (void)hideStoriesSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideStories];
 }
@@ -874,7 +901,7 @@ static NSArray<NSString *> *twab_exportKeys(void) {
               TWABKeyAdBlockCustomProxyEnabled, TWABKeyAdBlockProxy,
               TWABKeyEmotesEnabled, TWABKeyLaunchTab, TWABKeyLaunchSubTab,
               TWABKeyHideStories, TWABKeyDisableWatchLimit,
-              TWABKeyHideAdFreeButton ];
+              TWABKeyHideAdFreeButton, TWABKeyHidePickerButton ];
 }
 
 - (void)reloadEmotesTapped:(UIView *)anchor {

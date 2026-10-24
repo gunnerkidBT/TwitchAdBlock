@@ -5,6 +5,39 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.14 — October 24, 2026
+
+**Works with Twitch 31.7.** This is a big Twitch update: parts of the app are
+now built differently under the hood. Ad-blocking, 3rd-party emotes, the
+Following tab's ad cleanup, **Keep Live Feed Playing**, **Hide Twitch Stories**
+and your **default launch screen** have all been updated to keep working with it.
+Also fixed: the app crashing when you scrolled down to TwitchMods in Settings.
+
+**You can now send 7TV, BetterTTV and FrankerFaceZ emotes, not just see them.**
+When you tap into chat to type, a **7TV** bar appears just above the keyboard
+(on older versions of Twitch's chat it's a 7TV button next to Twitch's own emote
+button instead). Tap it to see all the emotes for the channel you're watching,
+plus the global ones. Animated emotes move in the picker, just like in chat.
+Search by name, tap one, and it's typed into your message. Your most recent
+picks show up at the top. Anyone in chat who uses 7TV, BTTV or FFZ (or this mod)
+sees the emote.
+
+You can also **press and hold Twitch's own emote button** to open the same
+picker. If you'd rather not have the bar, turn on **Hide 7TV Bar** in
+Settings → Emotes. Press-and-hold keeps working. Turning off
+**3rd-Party Emotes** removes both.
+
+**Get updates automatically in AltStore, SideStore or Feather.** Add this
+source and the app will tell you when a new TwitchMods version is out, even
+when only the mod changed and the Twitch version stayed the same:
+`https://raw.githubusercontent.com/gunnerkidBT/TwitchAdBlock/master/apps.json`
+
+(Heads up: your *own* message still shows the emote as its name on your screen.
+Twitch draws your messages itself, so the mod can't swap in the picture there.
+Everyone else sees the picture.)
+
+---
+
 ## v0.1.13 — August 13, 2026
 
 **Casting and AirPlay to a TV now work with ad-blocking on.** Before, having the

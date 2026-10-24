@@ -25,6 +25,8 @@
 //     reaches the decision (verified via extensive ObjC swizzle attempts).
 //   • Local-user outgoing messages are tokenized locally and bypass the IRC
 //     echo, so your own emotes only render for OTHER viewers.
+//   • Sending works by typing the emote's name (it's plain chat text). The
+//     picker button in EmotePicker.x inserts names for you.
 
 #import <Foundation/Foundation.h>
 #import <os/log.h>
@@ -181,6 +183,45 @@ static NSDictionary *twab_entryForFakeId(NSString *fakeId) {
         result = twab_byFakeId()[fakeId];
     });
     return result;
+}
+
+// ─── Picker support ─────────────────────────────────────────────────────────
+//
+// The chat emote picker (EmotePicker.x) lists the emotes usable in the
+// channel you're watching. "Current room" is the room-id of the most recent
+// ROOMSTATE — Twitch sends one on every JOIN, so it tracks channel switches.
+// Mutated only under the emote queue's barrier.
+
+static NSString *twab_currentRoom;
+
+// Snapshot of the emotes for the current channel + globals, for the picker.
+// Each entry: word, provider, id, animated, channel (BOOL — NO for globals).
+// Channel emotes first, then globals; each group sorted case-insensitively.
+NSArray<NSDictionary *> *twab_pickerEmotes(void) {
+    NSMutableArray *channel = [NSMutableArray array];
+    NSMutableArray *global = [NSMutableArray array];
+    dispatch_sync(twab_emoteQueue(), ^{
+        NSString *room = twab_currentRoom;
+        NSMutableSet *ids = [NSMutableSet set];
+        if (room) [ids unionSet:twab_roomFakeIds()[room] ?: [NSSet set]];
+        [ids unionSet:twab_roomFakeIds()[TWAB_GLOBAL_ROOM] ?: [NSSet set]];
+        for (NSString *fakeId in ids) {
+            NSDictionary *e = twab_byFakeId()[fakeId];
+            if (!e) continue;
+            BOOL isChannel = room && [e[@"room"] isEqualToString:room];
+            NSDictionary *out = @{@"word": e[@"word"],
+                                  @"provider": e[@"provider"],
+                                  @"id": e[@"id"],
+                                  @"animated": e[@"animated"] ?: @NO,
+                                  @"channel": @(isChannel)};
+            [(isChannel ? channel : global) addObject:out];
+        }
+    });
+    NSSortDescriptor *byWord = [NSSortDescriptor sortDescriptorWithKey:@"word"
+        ascending:YES selector:@selector(caseInsensitiveCompare:)];
+    [channel sortUsingDescriptors:@[byWord]];
+    [global sortUsingDescriptors:@[byWord]];
+    return [channel arrayByAddingObjectsFromArray:global];
 }
 
 // ─── Emote loaders ──────────────────────────────────────────────────────────
@@ -425,6 +466,14 @@ static NSURL *twab_computeEmoteCDNURL(NSString *provider, NSString *realId, BOOL
     return nil;
 }
 
+// Thumbnail URL for the picker. Same variant chat uses: GIF for animated
+// emotes (EmotePicker.x decodes the frames), static otherwise.
+NSURL *twab_pickerImageURL(NSDictionary *emote) {
+    NSNumber *animBox = emote[@"animated"];
+    BOOL animated = [animBox isKindOfClass:NSNumber.class] && [animBox boolValue];
+    return twab_computeEmoteCDNURL(emote[@"provider"], emote[@"id"], animated);
+}
+
 static NSURL *twab_rewriteEmoteURL(NSURL *url) {
     NSString *s = url.absoluteString;
     if (!s || ![s containsString:@"emoticons/v2/"]) return nil;
@@ -655,7 +704,10 @@ static void twab_observeIRCLine(NSString *line) {
     if (tagsEnd.location == NSNotFound) return;
     NSString *tagsPart = [line substringToIndex:tagsEnd.location];
     NSString *roomId = twab_extractTag(tagsPart, @"room-id");
-    if (roomId.length) twab_loadChannelEmotes(roomId);
+    if (!roomId.length) return;
+    NSString *room = [roomId copy];
+    dispatch_barrier_async(twab_emoteQueue(), ^{ twab_currentRoom = room; });
+    twab_loadChannelEmotes(room);
 }
 
 static NSString *twab_injectIRCEmotes(NSString *line) {
@@ -734,44 +786,51 @@ typedef void (^twab_recvHandler)(NSURLSessionWebSocketMessage *, NSError *);
 
 static char twab_handlerWrappedKey;
 
+// Rewrite one received chat text frame (one or more CRLF-separated IRC
+// lines). Returns the rewritten frame, or nil to deliver the original.
+// Shared by the native chat socket (NSURLSessionWebSocketTask) and the React
+// Native chat socket (SocketRocket, Twitch 31.x+). `path` is only for a
+// one-time log naming which chat implementation is live.
+static NSString *twab_rewriteIRCFrame(NSString *s, const char *path) {
+    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled] || !s.length) return nil;
+    // Fast bail for non-IRC frames. Twitch IRC lines always start with
+    // `@` (tagged), `:` (prefixed), or a command word — for the chat
+    // socket that's PING/PONG. Anything else is a different protocol
+    // (e.g., a pubsub or graphql subscription frame) and shouldn't be
+    // split-by-CRLF or scanned for emote tokens.
+    unichar first = [s characterAtIndex:0];
+    if (first != '@' && first != ':' && first != 'P') return nil;
+
+    static NSMutableSet *loggedPaths;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ loggedPaths = [NSMutableSet set]; });
+    NSString *pathKey = @(path);
+    @synchronized (loggedPaths) {
+        if (![loggedPaths containsObject:pathKey]) {
+            [loggedPaths addObject:pathKey];
+            os_log(OS_LOG_DEFAULT, "[TWAB-Chat] IRC frames arriving via %{public}s", path);
+        }
+    }
+
+    NSArray<NSString *> *lines = [s componentsSeparatedByString:@"\r\n"];
+    NSMutableArray<NSString *> *out = [NSMutableArray arrayWithCapacity:lines.count];
+    BOOL changed = NO;
+    for (NSString *line in lines) {
+        twab_observeIRCLine(line);  // ROOMSTATE preload
+        NSString *mod = twab_injectIRCEmotes(line);
+        if (mod) { [out addObject:mod]; changed = YES; }
+        else     { [out addObject:line]; }
+    }
+    return changed ? [out componentsJoinedByString:@"\r\n"] : nil;
+}
+
 static twab_recvHandler twab_wrapHandler(twab_recvHandler h) {
     if (!h) return h;
     if (objc_getAssociatedObject(h, &twab_handlerWrappedKey)) return h;
     twab_recvHandler wrapped = ^(NSURLSessionWebSocketMessage *msg, NSError *err) {
-        if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled]) {
-            h(msg, err);
-            return;
-        }
-        if (!msg || msg.type != NSURLSessionWebSocketMessageTypeString || !msg.string) {
-            h(msg, err);
-            return;
-        }
-        NSString *s = msg.string;
-        // Fast bail for non-IRC frames. Twitch IRC lines always start with
-        // `@` (tagged), `:` (prefixed), or a command word — for the chat
-        // socket that's PING/PONG. Anything else is a different protocol
-        // (e.g., a pubsub or graphql subscription frame) and shouldn't be
-        // split-by-CRLF or scanned for emote tokens.
-        unichar first = s.length ? [s characterAtIndex:0] : 0;
-        if (first != '@' && first != ':' && first != 'P') {
-            h(msg, err);
-            return;
-        }
-        NSArray<NSString *> *lines = [s componentsSeparatedByString:@"\r\n"];
-        NSMutableArray<NSString *> *out = [NSMutableArray arrayWithCapacity:lines.count];
-        BOOL changed = NO;
-        for (NSString *line in lines) {
-            twab_observeIRCLine(line);  // ROOMSTATE preload
-            NSString *mod = twab_injectIRCEmotes(line);
-            if (mod) { [out addObject:mod]; changed = YES; }
-            else     { [out addObject:line]; }
-        }
-        if (changed) {
-            NSString *joined = [out componentsJoinedByString:@"\r\n"];
-            h([[NSURLSessionWebSocketMessage alloc] initWithString:joined], err);
-        } else {
-            h(msg, err);
-        }
+        NSString *rewritten = (msg.type == NSURLSessionWebSocketMessageTypeString)
+            ? twab_rewriteIRCFrame(msg.string, "native chat (NSURLSessionWebSocketTask)") : nil;
+        h(rewritten ? [[NSURLSessionWebSocketMessage alloc] initWithString:rewritten] : msg, err);
     };
     objc_setAssociatedObject(wrapped, &twab_handlerWrappedKey, @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -795,9 +854,55 @@ static twab_recvHandler twab_wrapHandler(twab_recvHandler h) {
 %end
 %end
 
+// Twitch 31.x ships a React Native chat that connects to irc-ws.chat.twitch.tv
+// through React Native's WebSocket module, which uses SocketRocket rather than
+// NSURLSessionWebSocketTask. SocketRocket hands each text frame to its delegate
+// (RCTWebSocketModule) via -webSocket:didReceiveMessageWithString: if the
+// delegate implements it, else -webSocket:didReceiveMessage:. Each selector is
+// its own group, installed only when RCTWebSocketModule itself implements it —
+// adding a method it lacks would change which one SocketRocket calls.
+%group RNWSString
+%hook RCTWebSocketModule
+- (void)webSocket:(id)webSocket didReceiveMessageWithString:(NSString *)string {
+    NSString *rewritten = [string isKindOfClass:NSString.class]
+        ? twab_rewriteIRCFrame(string, "React Native chat (SocketRocket)") : nil;
+    %orig(webSocket, rewritten ?: string);
+}
+%end
+%end
+
+%group RNWSAny
+%hook RCTWebSocketModule
+- (void)webSocket:(id)webSocket didReceiveMessage:(id)message {
+    NSString *rewritten = [message isKindOfClass:NSString.class]
+        ? twab_rewriteIRCFrame(message, "React Native chat (SocketRocket)") : nil;
+    %orig(webSocket, rewritten ?: message);
+}
+%end
+%end
+
+static BOOL twab_classImplements(Class cls, SEL sel) {
+    unsigned int n = 0;
+    Method *methods = class_copyMethodList(cls, &n);
+    BOOL found = NO;
+    for (unsigned int i = 0; i < n && !found; i++) found = method_getName(methods[i]) == sel;
+    free(methods);
+    return found;
+}
+
 %ctor {
     %init;
     if (objc_getClass("__NSURLSessionWebSocketTask")) %init(PrivateWS);
+    Class rnws = objc_getClass("RCTWebSocketModule");
+    if (rnws && twab_classImplements(rnws, @selector(webSocket:didReceiveMessageWithString:)))
+        %init(RNWSString);
+    if (rnws && twab_classImplements(rnws, @selector(webSocket:didReceiveMessage:)))
+        %init(RNWSAny);
+    os_log(OS_LOG_DEFAULT, "[TWAB-Chat] React Native WebSocket module %{public}s",
+           !rnws ? "not present"
+           : twab_classImplements(rnws, @selector(webSocket:didReceiveMessageWithString:)) ? "hooked (string)"
+           : twab_classImplements(rnws, @selector(webSocket:didReceiveMessage:)) ? "hooked (any)"
+           : "present but no receive method found");
     // NB: defaults for TWABKeyEmotesEnabled / TWABKeyEmotePrefetchEnabled
     // are set in Tweak.x's %ctor, NOT here — Logos doesn't guarantee
     // inter-file ctor ordering and tweakDefaults may be nil at this

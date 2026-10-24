@@ -7,6 +7,19 @@ and repacks into a new IPA ready for sideloading.
 
 Usage:
     python3 inject_ipa.py <input.ipa> <TwitchTTVLOL.dylib> [output.ipa]
+                          [--no-plugins] [--mod-version X.Y.Z]
+
+Options:
+    --no-plugins   Strip Payload/<App>.app/PlugIns (all app extensions) before
+                   repacking. Each extension is a separate bundle ID that
+                   consumes an App ID slot when sideloading; removing them lets
+                   free Apple ID accounts (10 App IDs / 7 days) install the app.
+    --mod-version  Stamp the mod version into the app's build number
+                   (CFBundleVersion) so every mod release has a unique,
+                   increasing build. AltStore uses it (the source's
+                   buildVersion) to offer updates for mod-only releases on the
+                   same Twitch version. The version shown in the app (30.7)
+                   is left alone.
 """
 
 import struct
@@ -189,14 +202,54 @@ def patch_ats(plist_path: str) -> None:
     print(f"  Set NSAppTransportSecurity.NSAllowsArbitraryLoads = True")
 
 
+def mod_build_offset(mod_version: str) -> int:
+    """0.1.14 -> 114, 1.2.3 -> 10203. Strictly increasing across releases."""
+    parts = [int(p) for p in mod_version.split(".")]
+    if len(parts) != 3 or any(p < 0 or p > 99 for p in parts[1:]):
+        raise ValueError(f"--mod-version must look like X.Y.Z (Y, Z <= 99): {mod_version}")
+    major, minor, patch = parts
+    return major * 10000 + minor * 100 + patch
+
+
+def stamp_build_version(plist_path: str, mod_version: str) -> None:
+    """Give this mod release its own CFBundleVersion: Twitch's build number
+    plus mod_build_offset(). Twitch's build is a plain integer, so the result
+    stays a plain integer (anything in the app that parses it as a number
+    still works). Non-numeric builds get ".<offset>" appended instead."""
+    with open(plist_path, "rb") as f:
+        data = f.read()
+    fmt = plistlib.FMT_BINARY if data.startswith(b"bplist") else plistlib.FMT_XML
+    plist = plistlib.loads(data)
+    orig = str(plist.get("CFBundleVersion", "0"))
+    offset = mod_build_offset(mod_version)
+    stamped = str(int(orig) + offset) if orig.isdigit() else f"{orig}.{offset}"
+    plist["CFBundleVersion"] = stamped
+    with open(plist_path, "wb") as f:
+        plistlib.dump(plist, f, fmt=fmt)
+    print(f"  CFBundleVersion {orig} -> {stamped} (mod {mod_version})")
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(1)
 
-    ipa_path  = sys.argv[1]
-    dylib_src = sys.argv[2]
-    out_path  = sys.argv[3] if len(sys.argv) > 3 else ipa_path.replace(".ipa", "-patched.ipa")
+    args        = sys.argv[1:]
+    no_plugins  = "--no-plugins" in args
+    args        = [a for a in args if a != "--no-plugins"]
+    mod_version = None
+    if "--mod-version" in args:
+        i = args.index("--mod-version")
+        if i + 1 >= len(args):
+            print("--mod-version needs a value, e.g. --mod-version 0.1.14")
+            sys.exit(1)
+        mod_version = args[i + 1]
+        mod_build_offset(mod_version)  # validate before doing any work
+        del args[i:i + 2]
+
+    ipa_path  = args[0]
+    dylib_src = args[1]
+    out_path  = args[2] if len(args) > 2 else ipa_path.replace(".ipa", "-patched.ipa")
 
     print(f"[1/5] Reading IPA: {ipa_path}")
     with zipfile.ZipFile(ipa_path, "r") as z:
@@ -229,6 +282,20 @@ def main():
         with zipfile.ZipFile(ipa_path, "r") as z:
             z.extractall(tmpdir)
 
+        if no_plugins:
+            plugins_dir = os.path.join(tmpdir, f"Payload/{app_name}/PlugIns")
+            if os.path.isdir(plugins_dir):
+                removed = sorted(
+                    d for d in os.listdir(plugins_dir)
+                    if d.endswith(".appex")
+                )
+                shutil.rmtree(plugins_dir)
+                print(f"  Stripped PlugIns/ — removed {len(removed)} app extension(s):")
+                for d in removed:
+                    print(f"      - {d}")
+            else:
+                print("  --no-plugins set but no PlugIns/ directory found — nothing to strip")
+
         binary_path = os.path.join(tmpdir, binary_zip_path)
         frameworks_dir = os.path.join(tmpdir, f"Payload/{app_name}/Frameworks")
         dylib_dest = os.path.join(frameworks_dir, dylib_fname)
@@ -251,6 +318,15 @@ def main():
         info_plist = os.path.join(tmpdir, f"Payload/{app_name}/Info.plist")
         if os.path.exists(info_plist):
             patch_ats(info_plist)
+            if mod_version:
+                stamp_build_version(info_plist, mod_version)
+                # App extensions must carry the same build number as the app.
+                plugins_dir = os.path.join(tmpdir, f"Payload/{app_name}/PlugIns")
+                if os.path.isdir(plugins_dir):
+                    for appex in sorted(os.listdir(plugins_dir)):
+                        appex_plist = os.path.join(plugins_dir, appex, "Info.plist")
+                        if os.path.exists(appex_plist):
+                            stamp_build_version(appex_plist, mod_version)
         else:
             print(f"  WARNING: {info_plist} not found — proxy routing will fail with ATS errors")
 

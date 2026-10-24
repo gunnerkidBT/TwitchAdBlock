@@ -31,6 +31,9 @@ A modified Twitch iOS app that blocks ads and adds some handy extras.
 ### Chat emotes
 - Shows **7TV**, **BetterTTV**, and **FrankerFaceZ** emotes right in chat, both
   global and per-channel.
+- **Send them too:** tap into chat and a **7TV** bar appears above the keyboard
+  (or press and hold Twitch's emote button). It opens a searchable list of the
+  channel's emotes, animated ones included. Tap one to type it into your message.
 - A **Reload Emotes** button to refresh them if a streamer adds new ones while
   you're watching.
 
@@ -50,6 +53,33 @@ A modified Twitch iOS app that blocks ads and adds some handy extras.
 
 For a plain-language list of everything that's changed, see
 [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## Get it
+
+### Add the source (get update notifications)
+
+Add this source in **AltStore**, **SideStore** or **Feather** to install
+TwitchMods and be told when a new version comes out:
+
+```
+https://raw.githubusercontent.com/gunnerkidBT/TwitchAdBlock/master/apps.json
+```
+
+- **AltStore / SideStore:** Sources tab → **+** → paste the link → install
+  **TwitchMods** from the source.
+- **Feather:** Sources → **+** → paste the link.
+
+The source installs the full app. If you're on a free Apple ID and run out of
+App IDs, AltStore offers to remove the app extensions for you. You can also use
+the `-noplugins` IPA from Releases instead.
+
+### Or download the IPA
+
+Grab it from the [Releases](https://github.com/gunnerkidBT/TwitchAdBlock/releases)
+page and install it with AltStore / SideStore (drag in the IPA) or TrollStore
+(tap **+**, pick the IPA).
 
 ---
 
@@ -102,6 +132,28 @@ page and jump to **Install**.
    ```
 
    (This drops the tweak into the app and lets it load plain-HTTP proxy traffic.)
+   Add `--no-plugins` to strip the app extensions (fewer App IDs on a free
+   Apple ID).
+
+**Publishing a release (maintainer)**
+
+1. Inject with `--mod-version`, so each mod release gets its own build number.
+   That's how AltStore knows there's an update when only the mod changed:
+
+   ```bash
+   python3 inject_ipa.py Twitch-decrypted.ipa .theos/obj/debug/arm64/TwitchAdBlock.dylib \
+       tv.twitch-31.7-TwitchAdBlock-0.1.14.ipa --mod-version 0.1.14
+   ```
+
+2. Upload the IPA(s) to a GitHub release tagged like `v31.7-0.1.14`.
+3. Add the release to the source and commit `apps.json`:
+
+   ```bash
+   python3 make_source.py tv.twitch-31.7-TwitchAdBlock-0.1.14.ipa --tag v31.7-0.1.14
+   ```
+
+   The "What's New" text comes from the matching `## v0.1.14` section of
+   CHANGELOG.md. For a Twitch-only rebuild, pass e.g. `--heading "Twitch 30.8"`.
 
 **Install**
 

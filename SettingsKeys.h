@@ -29,6 +29,13 @@ extern NSString *const TWABKeyHideAdFreeButton;
 // showing the Watch/Follow blocking overlay. Implemented by rewriting the
 // `maxStreamWatchSeconds` field in the FeedItems GraphQL response.
 extern NSString *const TWABKeyDisableWatchLimit;
+// Array of emote words — most recently picked first — shown in the "Recent"
+// section of the chat emote picker. Not a user setting; not exported.
+extern NSString *const TWABKeyRecentEmotes;
+// BOOL - when YES, the 7TV bar above the keyboard (React Native chat) or the
+// 7TV button in the chat bar (native chat) is hidden. Long-pressing
+// Twitch's emote button still opens the 7TV picker.
+extern NSString *const TWABKeyHidePickerButton;
 
 // Resolves which proxy address to use right now: the user's custom value
 // when the custom-proxy toggle is on, otherwise the bundled default.

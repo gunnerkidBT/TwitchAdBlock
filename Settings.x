@@ -2,7 +2,112 @@
 #import "Settings.h"
 #import "Tweak.h"
 
+// Our "TwitchMods" row is one past the end of Twitch's last section. Every
+// per-row UITableView method Twitch implements would otherwise receive that
+// index path and look it up in its own (shorter) model — a Swift
+// index-out-of-range crash as soon as the row scrolls into view (31.7 added
+// per-row delegate methods 30.x didn't have). So each per-row method below
+// either handles our row itself or hands Twitch the row above ours instead.
+// Logos only hooks the ones the class actually implements.
+static BOOL twab_isOurRow(UIViewController<UITableViewDataSource> *vc, UITableView *tableView,
+                          NSIndexPath *indexPath) {
+  NSInteger lastSection = [vc numberOfSectionsInTableView:tableView] - 1;
+  return indexPath.section == lastSection &&
+         indexPath.row == [vc tableView:tableView numberOfRowsInSection:lastSection] - 1;
+}
+
+static NSIndexPath *twab_templateRow(NSIndexPath *ours) {
+  return [NSIndexPath indexPathForRow:MAX(ours.row - 1, 0) inSection:ours.section];
+}
+
 %hook _TtC6Twitch25AccountMenuViewController
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return %orig(tableView, twab_templateRow(indexPath));
+  return %orig;
+}
+- (CGFloat)tableView:(UITableView *)tableView estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return %orig(tableView, twab_templateRow(indexPath));
+  return %orig;
+}
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell
+    forRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return;  // no analytics impression for our row
+  %orig;
+}
+- (void)tableView:(UITableView *)tableView didEndDisplayingCell:(UITableViewCell *)cell
+    forRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return;
+  %orig;
+}
+- (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return YES;
+  return %orig;
+}
+- (void)tableView:(UITableView *)tableView didHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return;
+  %orig;
+}
+- (void)tableView:(UITableView *)tableView didUnhighlightRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return;
+  %orig;
+}
+- (NSIndexPath *)tableView:(UITableView *)tableView willSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return indexPath;
+  return %orig;
+}
+- (NSInteger)tableView:(UITableView *)tableView indentationLevelForRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return 0;
+  return %orig;
+}
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return NO;
+  return %orig;
+}
+- (UIContextMenuConfiguration *)tableView:(UITableView *)tableView
+    contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return nil;
+  return %orig;
+}
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
+    leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return nil;
+  return %orig;
+}
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
+    trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return nil;
+  return %orig;
+}
+- (BOOL)tableView:(UITableView *)tableView shouldShowMenuForRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return NO;
+  return %orig;
+}
+- (void)tableView:(UITableView *)tableView accessoryButtonTappedForRowWithIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return;
+  %orig;
+}
+- (BOOL)tableView:(UITableView *)tableView shouldIndentWhileEditingRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return NO;
+  return %orig;
+}
+- (BOOL)tableView:(UITableView *)tableView canFocusRowAtIndexPath:(NSIndexPath *)indexPath {
+  if (twab_isOurRow((id)self, tableView, indexPath)) return YES;
+  return %orig;
+}
+// UITableViewDataSourcePrefetching: scrolling hands over batches of upcoming
+// rows, ours included.
+- (void)tableView:(UITableView *)tableView prefetchRowsAtIndexPaths:(NSArray<NSIndexPath *> *)indexPaths {
+  NSIndexSet *keep = [indexPaths indexesOfObjectsPassingTest:^BOOL(NSIndexPath *ip, NSUInteger i, BOOL *stop) {
+    return !twab_isOurRow((id)self, tableView, ip);
+  }];
+  if (keep.count) %orig(tableView, [indexPaths objectsAtIndexes:keep]);
+}
+- (void)tableView:(UITableView *)tableView cancelPrefetchingForRowsAtIndexPaths:(NSArray<NSIndexPath *> *)indexPaths {
+  NSIndexSet *keep = [indexPaths indexesOfObjectsPassingTest:^BOOL(NSIndexPath *ip, NSUInteger i, BOOL *stop) {
+    return !twab_isOurRow((id)self, tableView, ip);
+  }];
+  if (keep.count) %orig(tableView, [indexPaths objectsAtIndexes:keep]);
+}
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
   if (indexPath.section == [self numberOfSectionsInTableView:tableView] - 1 &&
       indexPath.row == [self tableView:tableView numberOfRowsInSection:indexPath.section] - 1) {

@@ -322,16 +322,183 @@ static void *hook_swift_unknownObjectWeakLoadStrong(void *ref) {
 // client class in a future Twitch version means one more hook block but no
 // duplicated logic.
 
-static NSData *twab_filteredFeedData(NSData *data, NSURLSessionDataTask *dataTask) {
-  if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) return data;
+// Keep Live Feed Playing, byte level. Independent of which operation carries
+// it, whether the JSON arrives in one chunk, or whether it parses at all:
+// rewrite the number after "maxStreamWatchSeconds": / "maxWatchSeconds": in
+// the raw bytes to 1,000,000 (JS-timer-safe; see NSData+TwitchAdBlock.m).
+// Also traces every response carrying such a field, so a new source shows up
+// in the log. (A key split across two chunks would slip past; rare, and the
+// JSON-level pass catches whole documents anyway.)
+static NSData *twab_rewriteWatchLimitBytes(NSData *data, NSURLRequest *request, NSString *via) {
+  if (data.length < 20 || ![tweakDefaults boolForKey:TWABKeyAdBlockEnabled] ||
+      ![tweakDefaults boolForKey:TWABKeyDisableWatchLimit]) return data;
+  if ([data rangeOfData:[@"atchSeconds\"" dataUsingEncoding:NSUTF8StringEncoding]
+                options:0 range:NSMakeRange(0, data.length)].location == NSNotFound) return data;
+  NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+  if (!s) return data;  // chunk split mid-UTF-8 sequence; JSON pass may still catch it
+  static NSRegularExpression *re;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    re = [NSRegularExpression regularExpressionWithPattern:
+            @"(\"(?:maxStreamWatchSeconds|maxWatchSeconds)\"\\s*:\\s*)(\\d+)" options:0 error:nil];
+  });
+  NSArray<NSTextCheckingResult *> *matches = [re matchesInString:s options:0 range:NSMakeRange(0, s.length)];
+  if (!matches.count) return data;
+  // React Native's Live feed (31.x) still cut off with 1,000,000, so its JS
+  // evidently clamps large values; for it, null — "no limit configured" — is
+  // used instead (JS doesn't schema-check, and treats a missing limit as none).
+  // Native Apollo parses against the schema, so it keeps the big number.
+  NSString *replacement = [via isEqualToString:@"RCTHTTPRequestHandler"] ? @"null" : @"1000000";
+  NSMutableArray *seen = [NSMutableArray array];
+  NSMutableString *out = [s mutableCopy];
+  BOOL changed = NO;
+  // Back to front so earlier ranges stay valid.
+  for (NSTextCheckingResult *m in matches.reverseObjectEnumerator) {
+    [seen insertObject:[s substringWithRange:m.range] atIndex:0];
+    NSRange num = [m rangeAtIndex:2];
+    if (![[s substringWithRange:num] isEqualToString:replacement]) {
+      [out replaceCharactersInRange:num withString:replacement];
+      changed = YES;
+    }
+  }
+  os_log(OS_LOG_DEFAULT, "[TWAB-Watch] watch limit in %{public}@%{public}@ via %{public}@: %{public}@ -> %{public}@",
+         request.URL.host ?: @"?", request.URL.path ?: @"", via,
+         [seen componentsJoinedByString:@", "], replacement);
+  return changed ? [out dataUsingEncoding:NSUTF8StringEncoding] : data;
+}
+
+static NSData *twab_filteredFeedData(id delegate, NSData *data, NSURLSessionDataTask *dataTask) {
+  data = twab_rewriteWatchLimitBytes(data, dataTask.currentRequest, NSStringFromClass([delegate class]));
+  // Ad-block (ad strip, watch limit) and Hide Stories (empties the Stories
+  // shelf response) both filter here; each is gated inside on its own toggle.
+  if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled] &&
+      ![tweakDefaults boolForKey:TWABKeyHideStories]) return data;
   return [data twab_responseDataForRequest:dataTask.currentRequest];
 }
+
+// Keep Live Feed Playing — the native feed prefetch (31.x). The React Native
+// Live feed's first page is fetched natively (DiscoveryFeedPreloadGqlFetcher,
+// behind ios_discovery_feed_native_gql_prefetch) outside every network hook
+// above, then handed to JS by the bridge method -awaitFeedPreload:rejecter:.
+// Its watch limit is what the feed actually enforces. Wrap that method's
+// resolve block so whatever it hands JS (JSON text or parsed objects) has
+// maxStreamWatchSeconds / maxWatchSeconds nulled — "no limit" to JS.
+typedef void (^twab_rnResolve)(id result);
+typedef void (^twab_rnReject)(NSString *code, NSString *message, NSError *error);
+
+static NSUInteger twab_preloadLimitsNulled;
+
+static id twab_nullWatchLimits(id obj, NSUInteger depth) {
+  if (!obj || depth > 40) return obj;
+  if ([obj isKindOfClass:NSDictionary.class]) {
+    NSMutableDictionary *d = [(NSDictionary *)obj mutableCopy];
+    for (id key in [d allKeys]) {
+      if ([key isEqual:@"maxStreamWatchSeconds"] || [key isEqual:@"maxWatchSeconds"]) {
+        if (d[key] != (id)kCFNull) {
+          os_log(OS_LOG_DEFAULT, "[TWAB-Watch] feed preload: %{public}@ %{public}@ -> null", key, d[key]);
+          d[key] = (id)kCFNull;
+          twab_preloadLimitsNulled++;
+        }
+      } else {
+        d[key] = twab_nullWatchLimits(d[key], depth + 1);
+      }
+    }
+    return d;
+  }
+  if ([obj isKindOfClass:NSArray.class]) {
+    NSMutableArray *a = [NSMutableArray arrayWithCapacity:[(NSArray *)obj count]];
+    for (id v in (NSArray *)obj) [a addObject:twab_nullWatchLimits(v, depth + 1) ?: (id)kCFNull];
+    return a;
+  }
+  if ([obj isKindOfClass:NSString.class] && [(NSString *)obj containsString:@"atchSeconds"]) {
+    // JSON text (possibly escaped inside another JSON string).
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+      re = [NSRegularExpression regularExpressionWithPattern:
+              @"(\\\\?\"(?:maxStreamWatchSeconds|maxWatchSeconds)\\\\?\"\\s*:\\s*)\\d+" options:0 error:nil];
+    });
+    NSString *s = obj;
+    NSUInteger before = [re numberOfMatchesInString:s options:0 range:NSMakeRange(0, s.length)];
+    if (!before) return obj;
+    os_log(OS_LOG_DEFAULT, "[TWAB-Watch] feed preload: nulled %lu watch limit(s) in JSON text", (unsigned long)before);
+    twab_preloadLimitsNulled += before;
+    return [re stringByReplacingMatchesInString:s options:0 range:NSMakeRange(0, s.length)
+                                   withTemplate:@"$1null"];
+  }
+  return obj;
+}
+
+static void twab_hookFeedPreload(void) {
+  SEL sel = NSSelectorFromString(@"awaitFeedPreload:rejecter:");
+  BOOL found = NO;
+  unsigned int count = 0;
+  const char **names = objc_copyClassNamesForImage(NSBundle.mainBundle.executablePath.UTF8String, &count);
+  for (unsigned int i = 0; i < count; i++) {
+    // Only bridge-module-ish classes; avoids realizing thousands of classes.
+    if (!strstr(names[i], "RN") && !strstr(names[i], "Preload") && !strstr(names[i], "Feed")) continue;
+    Class cls = objc_getClass(names[i]);
+    Method m = cls ? class_getInstanceMethod(cls, sel) : NULL;
+    if (!m) continue;
+    Class sup = class_getSuperclass(cls);
+    if (sup && class_getInstanceMethod(sup, sel) == m) continue;  // inherited; hook the definer
+    IMP orig = method_getImplementation(m);
+    method_setImplementation(m, imp_implementationWithBlock(^(id self, twab_rnResolve resolve, twab_rnReject reject) {
+      twab_rnResolve wrapped = resolve;
+      if (resolve && [tweakDefaults boolForKey:TWABKeyAdBlockEnabled] &&
+          [tweakDefaults boolForKey:TWABKeyDisableWatchLimit]) {
+        wrapped = ^(id result) {
+          NSUInteger before = twab_preloadLimitsNulled;
+          id out = twab_nullWatchLimits(result, 0);
+          os_log(OS_LOG_DEFAULT, "[TWAB-Watch] feed preload resolved (%{public}@), limits nulled: %lu",
+                 NSStringFromClass([result class]), (unsigned long)(twab_preloadLimitsNulled - before));
+          resolve(out);
+        };
+      }
+      ((void (*)(id, SEL, twab_rnResolve, twab_rnReject))orig)(self, sel, wrapped, reject);
+    }));
+    os_log(OS_LOG_DEFAULT, "[TWAB-Watch] hooked feed preload bridge on %{public}s", names[i]);
+    found = YES;
+  }
+  free(names);
+  if (!found)
+    os_log(OS_LOG_DEFAULT, "[TWAB-Watch] no class implements awaitFeedPreload:rejecter: (pre-31 Twitch?)");
+}
+
+// Diagnostic: tells whether the Watch/Follow overlay on screen is the native
+// one (this view) or React Native's (no log line).
+%hook _TtC6Twitch33EvolveFeedMaxWatchtimeOverlayView
+- (void)didMoveToWindow {
+  %orig;
+  if (((UIView *)self).window)
+    os_log(OS_LOG_DEFAULT, "[TWAB-Watch] NATIVE max-watch overlay shown (EvolveFeedMaxWatchtimeOverlayView)");
+}
+%end
+
+// Completion-handler requests (including Swift's async data(for:)) never
+// reach the delegate hooks below, so the watch-limit byte rewrite also wraps
+// their handlers. Only touches responses that contain a watch-limit field.
+typedef void (^twab_dataCompletion)(NSData *, NSURLResponse *, NSError *);
+
+static twab_dataCompletion twab_wrapWatchCompletion(NSURLRequest *request, twab_dataCompletion handler) {
+  if (!handler) return handler;
+  return ^(NSData *data, NSURLResponse *response, NSError *error) {
+    handler(data ? twab_rewriteWatchLimitBytes(data, request, @"completionHandler") : data, response, error);
+  };
+}
+
+%hook __NSURLSessionLocal
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
+                            completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+  return %orig(request, twab_wrapWatchCompletion(request, completionHandler));
+}
+%end
 
 %hook _TtC9TwitchKit18TKURLSessionClient
 - (void)URLSession:(NSURLSession *)session
           dataTask:(NSURLSessionDataTask *)dataTask
     didReceiveData:(NSData *)data {
-  %orig(session, dataTask, twab_filteredFeedData(data, dataTask));
+  %orig(session, dataTask, twab_filteredFeedData(self, data, dataTask));
 }
 %end
 
@@ -340,7 +507,18 @@ static NSData *twab_filteredFeedData(NSData *data, NSURLSessionDataTask *dataTas
 - (void)URLSession:(NSURLSession *)session
           dataTask:(NSURLSessionDataTask *)dataTask
     didReceiveData:(NSData *)data {
-  %orig(session, dataTask, twab_filteredFeedData(data, dataTask));
+  %orig(session, dataTask, twab_filteredFeedData(self, data, dataTask));
+}
+%end
+
+// React Native's networking (Twitch 31.x ships React Native screens that make
+// their own GraphQL calls via fetch). Same filter; it only rewrites
+// gql.twitch.tv/gql responses that actually carry ad nodes or a watch limit.
+%hook RCTHTTPRequestHandler
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+    didReceiveData:(NSData *)data {
+  %orig(session, dataTask, twab_filteredFeedData(self, data, dataTask));
 }
 %end
 
@@ -372,11 +550,25 @@ static void twab_clearFollowingAds(id self) {
   if ((self = %orig)) twab_clearFollowingAds(self);
   return self;
 }
-// 29.x+ (4-arg)
+// 29.x – 30.x (4-arg)
 - (instancetype)initWithGraphQL:(_TtC9TwitchKit9TKGraphQL *)graphQL
                    themeManager:(id)themeManager
                   urlController:(_TtC6Twitch13URLController *)urlController
                    isInitialTab:(BOOL)isInitialTab {
+  if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) return %orig;
+  if ((self = %orig)) twab_clearFollowingAds(self);
+  return self;
+}
+// 31.x+ — the GraphQL argument was dropped.
+- (instancetype)initWithThemeManager:(id)themeManager
+                       urlController:(_TtC6Twitch13URLController *)urlController
+                        isInitialTab:(BOOL)isInitialTab {
+  if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) return %orig;
+  if ((self = %orig)) twab_clearFollowingAds(self);
+  return self;
+}
+- (instancetype)initWithThemeManager:(id)themeManager
+                       urlController:(_TtC6Twitch13URLController *)urlController {
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) return %orig;
   if ((self = %orig)) twab_clearFollowingAds(self);
   return self;
@@ -411,18 +603,56 @@ static void twab_clearFollowingAds(id self) {
 //   parent tab == 0 → call selectViewControllerAtIndex:.
 // Browse sub (BrowseViewController): TWLaunchSubTab >= 0 AND parent tab
 //   == 1 → call selectViewControllerAtIndex:.
+// 31.x picks its own starting tab (InitialHomeTabSetting / an initial-tab
+// experiment) during a splash phase, which can land *after* the tab bar first
+// appears and silently undo ours. So: apply on first appearance, then re-check
+// at 0.5s / 1.5s / 3s and re-apply if something else moved it — but stop for
+// good the moment the user taps a tab, so we never fight them.
+static BOOL twab_userPickedTab = NO;
+
+static void twab_applyLaunchTab(UITabBarController *tbc, NSString *when) {
+    if (twab_userPickedTab || ![tweakDefaults objectForKey:TWABKeyLaunchTab]) return;
+    NSInteger idx = [tweakDefaults integerForKey:TWABKeyLaunchTab];
+    NSUInteger count = tbc.viewControllers.count;
+    if (idx < 0 || idx >= (NSInteger)count) {
+        os_log(OS_LOG_DEFAULT, "[TWAB-Launch] tab %ld out of range (%lu tabs) at %{public}@",
+               (long)idx, (unsigned long)count, when);
+        return;
+    }
+    if (tbc.selectedIndex == (NSUInteger)idx) return;
+    os_log(OS_LOG_DEFAULT, "[TWAB-Launch] %{public}@: selected tab %lu (%{public}@) -> %ld (%{public}@)",
+           when, (unsigned long)tbc.selectedIndex,
+           NSStringFromClass([tbc.selectedViewController class]), (long)idx,
+           NSStringFromClass([tbc.viewControllers[idx] class]));
+    tbc.selectedIndex = (NSUInteger)idx;
+}
+
 %hook _TtC6Twitch16TabBarController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        if (![tweakDefaults objectForKey:TWABKeyLaunchTab]) return;
-        NSInteger idx = [tweakDefaults integerForKey:TWABKeyLaunchTab];
         UITabBarController *tbc = (UITabBarController *)self;
-        if (idx >= 0 && idx < (NSInteger)tbc.viewControllers.count) {
-            tbc.selectedIndex = (NSUInteger)idx;
+        NSMutableArray *names = [NSMutableArray array];
+        for (UIViewController *vc in tbc.viewControllers) [names addObject:NSStringFromClass(vc.class)];
+        os_log(OS_LOG_DEFAULT, "[TWAB-Launch] tab bar appeared: %lu tabs [%{public}@], selected %lu",
+               (unsigned long)names.count, [names componentsJoinedByString:@", "],
+               (unsigned long)tbc.selectedIndex);
+        twab_applyLaunchTab(tbc, @"appear");
+        __weak UITabBarController *weakTbc = tbc;
+        for (NSNumber *ms in @[@500, @1500, @3000]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms.longLongValue * NSEC_PER_MSEC),
+                           dispatch_get_main_queue(), ^{
+                UITabBarController *strong = weakTbc;
+                if (strong) twab_applyLaunchTab(strong, [NSString stringWithFormat:@"+%@ms", ms]);
+            });
         }
     });
+}
+// A real tab tap — from here on the user is in charge.
+- (void)tabBar:(UITabBar *)tabBar didSelectItem:(UITabBarItem *)item {
+    twab_userPickedTab = YES;
+    %orig;
 }
 %end
 
@@ -480,40 +710,32 @@ static Ivar twab_findIvar(id obj, const char *name) {
 // Defined later in this file — scans all windows for the "Go Ad-Free" upsell.
 static void twab_handleAdFree(void);
 
-%hook _TtC6Twitch30DiscoveryFeedTabViewController
-- (void)viewDidLayoutSubviews {
-    %orig;
-    twab_handleAdFree();
-    if (![tweakDefaults objectForKey:TWABKeyLaunchSubTab]) return;
-    if ([tweakDefaults integerForKey:TWABKeyLaunchTab] != 0) return;
+// Returns YES when the desired page is showing (or the user took over).
+static BOOL twab_applyHomeSubTab(id self, NSString *when) {
+    static BOOL userSwiped = NO;
+    if (userSwiped) return YES;
+    if (![tweakDefaults objectForKey:TWABKeyLaunchSubTab]) return YES;
+    if ([tweakDefaults integerForKey:TWABKeyLaunchTab] != 0) return YES;
     NSInteger sub = [tweakDefaults integerForKey:TWABKeyLaunchSubTab];
-    if (sub < 0) return;
-
-    // Retry up to 5 layout passes — first pass may be too early (zero
-    // bounds / single page), later passes may include Twitch's own scroll
-    // reset that we need to override.
-    static int attempts = 0;
-    if (attempts >= 5) return;
+    if (sub < 0) return YES;
 
     UIView *view = ((UIViewController *)self).view;
     UIScrollView *sv = twab_findPagedScrollView(view);
-    if (!sv) return;
+    if (!sv) return NO;
+    // The user is swiping between Home's pages — hands off from now on.
+    if (sv.isTracking || sv.isDragging || sv.isDecelerating) {
+        userSwiped = YES;
+        return YES;
+    }
     CGFloat pageWidth = sv.bounds.size.width;
-    if (pageWidth <= 0) return;
+    if (pageWidth <= 0) return NO;
     CGFloat desired = pageWidth * (CGFloat)sub;
     CGFloat currentX = sv.contentOffset.x;
-    if (fabs(currentX - desired) < 1.0) {
-        attempts = INT_MAX;  // we're there, stop trying
-        os_log(OS_LOG_DEFAULT,
-            "[TWAB-Launch] reached desired page sub=%ld offsetX=%.0f", (long)sub, currentX);
-        return;
-    }
+    if (fabs(currentX - desired) < 1.0) return YES;
 
-    attempts++;
     os_log(OS_LOG_DEFAULT,
-        "[TWAB-Launch] attempt %d: sub=%ld pageWidth=%.0f currentX=%.0f desired=%.0f contentSize=%{public}@",
-        attempts, (long)sub, pageWidth, currentX, desired,
-        NSStringFromCGSize(sv.contentSize));
+        "[TWAB-Launch] sub-tab %{public}@: sub=%ld pageWidth=%.0f currentX=%.0f desired=%.0f contentSize=%{public}@",
+        when, (long)sub, pageWidth, currentX, desired, NSStringFromCGSize(sv.contentSize));
     [sv setContentOffset:CGPointMake(desired, 0) animated:NO];
 
     // Also write the internal index ivar so the top-tab indicator agrees
@@ -523,6 +745,31 @@ static void twab_handleAdFree(void);
         NSInteger *p = (NSInteger *)((char *)(__bridge void *)self + ivar_getOffset(iv));
         *p = sub;
     }
+    return NO;
+}
+
+%hook _TtC6Twitch30DiscoveryFeedTabViewController
+- (void)viewDidLayoutSubviews {
+    %orig;
+    twab_handleAdFree();
+    // Up to 5 layout passes (the first may be too early: zero bounds / one
+    // page), then timed re-checks over the first 3s in case Twitch's own
+    // initial-tab logic (31.x) switches the page after ours.
+    static int attempts = 0;
+    if (attempts >= 5) return;
+    attempts++;
+    twab_applyHomeSubTab(self, [NSString stringWithFormat:@"layout %d", attempts]);
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        __weak id weakSelf = self;
+        for (NSNumber *ms in @[@500, @1500, @3000]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms.longLongValue * NSEC_PER_MSEC),
+                           dispatch_get_main_queue(), ^{
+                id strong = weakSelf;
+                if (strong) twab_applyHomeSubTab(strong, [NSString stringWithFormat:@"+%@ms", ms]);
+            });
+        }
+    });
 }
 %end
 
@@ -756,8 +1003,19 @@ static void twab_handleAdFree(void) {
 - (void)viewDidLayoutSubviews {
   %orig;
   twab_handleAdFree();
+  // Backstop for the init hooks above: Twitch renames FollowingViewController's
+  // initializer every few versions (31.x dropped the GraphQL argument), and a
+  // missed rename would silently re-enable the display ads. Clear once per
+  // instance on first layout too.
+  static char clearedKey;
+  if ([tweakDefaults boolForKey:TWABKeyAdBlockEnabled] &&
+      !objc_getAssociatedObject(self, &clearedKey)) {
+    objc_setAssociatedObject(self, &clearedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    twab_clearFollowingAds(self);
+  }
 }
 %end
+
 
 // Diagnostics registry. Records whether each hooked Twitch/TwitchKit/Apollo
 // class resolved in the running binary so the settings "Diagnostics" screen
@@ -848,8 +1106,14 @@ static void twab_checkClass(const char *name) {
   // feed whose max-watchtime limit we neutralize and where feed display ads
   // live (candidate ivar for a future block: adStateManager).
   twab_checkClass("_TtC6Twitch24EvolveFeedViewController");
+  // Chat input bar + Twitch's emote button — the 3rd-party emote picker
+  // button (EmotePicker.x) is inserted beside the latter.
+  twab_checkClass("_TtC6Twitch13ChatInputView");
+  twab_checkClass("_TtC6Twitch27ChatInputViewEmoticonButton");
   // Either of the two URLSession client classes is enough — Twitch ships one
   // or the other per version. Record as a single combined entry.
+  // React Native feed prefetch bridge (31.x) — see twab_hookFeedPreload.
+  twab_hookFeedPreload();
   BOOL urlClientPresent = objc_getClass("_TtC9TwitchKit18TKURLSessionClient") ||
                           objc_getClass("_TtC6Apollo16URLSessionClient");
   [twab_diagStore() addObject:@{ @"name": @"URLSessionClient (TK or Apollo)",
