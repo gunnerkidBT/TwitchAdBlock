@@ -36,6 +36,17 @@ extern NSString *const TWABKeyRecentEmotes;
 // 7TV button in the chat bar (native chat) is hidden. Long-pressing
 // Twitch's emote button still opens the 7TV picker.
 extern NSString *const TWABKeyHidePickerButton;
+// BOOL - when YES, chat keeps messages a moderator deleted (CLEARMSG) and the
+// messages of users who were timed out / banned (CLEARCHAT), and shows a
+// system line saying what happened instead. Default NO.
+extern NSString *const TWABKeyKeepDeletedMessages;
+// BOOL - sub-setting of Keep Deleted Messages: when YES, the moderation note
+// is a highlighted chat message from "TwitchMods"; when NO (default), a plain
+// system line.
+extern NSString *const TWABKeyHighlightDeletedNotes;
+// BOOL - when YES, the Live page's "From channels you follow" bar of clips /
+// recaps (GraphQL op AnnouncementsRecapsBar) is emptied so it isn't shown.
+extern NSString *const TWABKeyHideRecapsBar;
 
 // Resolves which proxy address to use right now: the user's custom value
 // when the custom-proxy toggle is on, otherwise the bundled default.

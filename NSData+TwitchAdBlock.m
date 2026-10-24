@@ -257,6 +257,48 @@ static void twab_denyStoryAccess(NSMutableDictionary *data, NSString *opName, BO
     }
 }
 
+// Hide "From channels you follow": the Live page's bar of clips / recaps is the
+// AnnouncementsRecapsBar operation (AnnouncementRecapBar → items of
+// AnnouncementRecapBarItem). Empty every list in it that holds bar items, so
+// the bar has nothing to show. Matched by operation name only.
+static void twab_emptyRecapBarItems(id obj, BOOL *dirty, NSUInteger depth) {
+    if (depth > 20) return;
+    if ([obj isKindOfClass:NSMutableDictionary.class]) {
+        NSMutableDictionary *d = obj;
+        for (NSString *key in [d allKeys]) {
+            id v = d[key];
+            if ([v isKindOfClass:NSArray.class] && [(NSArray *)v count]) {
+                id first = [(NSArray *)v firstObject];
+                NSString *t = [first isKindOfClass:NSDictionary.class] ? first[@"__typename"] : nil;
+                if ([t isKindOfClass:NSString.class] && [t containsString:@"RecapBarItem"]) {
+                    os_log(OS_LOG_DEFAULT, "[TWAB-Shelf] emptied %lu %{public}@ (From channels you follow)",
+                           (unsigned long)[(NSArray *)v count], t);
+                    d[key] = [NSMutableArray array];
+                    *dirty = YES;
+                    continue;
+                }
+            }
+            twab_emptyRecapBarItems(v, dirty, depth + 1);
+        }
+    } else if ([obj isKindOfClass:NSArray.class]) {
+        for (id v in (NSArray *)obj) twab_emptyRecapBarItems(v, dirty, depth + 1);
+    }
+}
+
+// Hide "Go Ad-Free", data side (31.x): the Following tab is React Native, so
+// the native button hooks in Tweak.x can't see its "Go Ad-Free" button. The
+// button is fed by the TurboUpsellButton operation (Turbo offer / pricing /
+// subscription product); nulling its top-level fields leaves the button
+// nothing to render.
+static void twab_nullTurboUpsell(NSMutableDictionary *data, BOOL *dirty) {
+    for (NSString *key in [data allKeys]) {
+        if (data[key] == (id)kCFNull) continue;
+        data[key] = (id)kCFNull;
+        *dirty = YES;
+    }
+    if (*dirty) os_log(OS_LOG_DEFAULT, "[TWAB-AdFree] nulled TurboUpsellButton response (Go Ad-Free button)");
+}
+
 // Operation name for a response element: Twitch echoes it in
 // extensions.operationName; fall back to the matching request op (batched
 // requests and responses are index-aligned).
@@ -362,16 +404,23 @@ static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
     BOOL adBlock = [tweakDefaults boolForKey:TWABKeyAdBlockEnabled];
     BOOL stripWatchLimit = adBlock && [tweakDefaults boolForKey:TWABKeyDisableWatchLimit];
     BOOL hideStories = [tweakDefaults boolForKey:TWABKeyHideStories];
-    if (!adBlock && !hideStories) return self;
+    BOOL hideRecapsBar = [tweakDefaults boolForKey:TWABKeyHideRecapsBar];
+    BOOL hideAdFree = [tweakDefaults boolForKey:TWABKeyHideAdFreeButton];
+    if (!adBlock && !hideStories && !hideRecapsBar && !hideAdFree) return self;
     BOOL dirty = NO;
     NSArray *ops = [json isKindOfClass:NSMutableArray.class] ? json : @[json];
     for (NSUInteger i = 0; i < ops.count; i++) {
         NSMutableDictionary *op = ops[i];
         if (![op isKindOfClass:NSMutableDictionary.class]) continue;
+        NSString *opName = twab_responseOperationName(op, request, i);
         if (adBlock) twab_processTree(op[@"data"], arraySet, fieldSet, op[@"operationName"], &dirty);
         if (stripWatchLimit) twab_neutralizeWatchLimits(op[@"data"], &dirty);
+        if (hideRecapsBar && [opName isEqualToString:@"AnnouncementsRecapsBar"])
+            twab_emptyRecapBarItems(op[@"data"], &dirty, 0);
+        if (hideAdFree && [opName isEqualToString:@"TurboUpsellButton"] &&
+            [op[@"data"] isKindOfClass:NSMutableDictionary.class])
+            twab_nullTurboUpsell(op[@"data"], &dirty);
         if (hideStories) {
-            NSString *opName = twab_responseOperationName(op, request, i);
             if ([op[@"data"] isKindOfClass:NSMutableDictionary.class] && twab_isStoryShelfOperation(opName))
                 twab_emptyStoryShelf(op[@"data"], &dirty);
             if ([op[@"data"] isKindOfClass:NSMutableDictionary.class] && twab_isStoryAccessOperation(opName))

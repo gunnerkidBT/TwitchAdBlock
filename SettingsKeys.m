@@ -15,6 +15,9 @@ NSString *const TWABKeyHideAdFreeButton          = @"TWHideAdFreeButton";
 NSString *const TWABKeyDisableWatchLimit         = @"TWDisableWatchLimit";
 NSString *const TWABKeyRecentEmotes              = @"TWRecentEmotes";
 NSString *const TWABKeyHidePickerButton          = @"TWHidePickerButton";
+NSString *const TWABKeyKeepDeletedMessages       = @"TWKeepDeletedMessages";
+NSString *const TWABKeyHighlightDeletedNotes     = @"TWHighlightDeletedNotes";
+NSString *const TWABKeyHideRecapsBar             = @"TWHideRecapsBar";
 
 NSString *twab_effectiveProxyAddress(void) {
     return [tweakDefaults boolForKey:TWABKeyAdBlockCustomProxyEnabled]

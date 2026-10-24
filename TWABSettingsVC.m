@@ -186,8 +186,8 @@ extern NSArray<NSString *> *twab_pickerDiagnostics(void);
 // Section layout:
 //   0: Ad Block toggle           (always shown)
 //   1: Proxy + custom proxy      (only when ad block is on)
-//   2: Emotes toggle + hide 7TV bar + reload    (always shown)
-//   3: Home: launch / stories / keep-live-feed
+//   2: Emotes toggle + hide 7TV bar + keep deleted messages [+ highlight notes] + reload
+//   3: Home: launch / stories / "from channels you follow" bar / keep-live-feed
 //   4: Tools: export / import / diagnostics
 //   5: empty / version footer    (always shown — last section)
 
@@ -229,8 +229,8 @@ static const TWABLaunchOpt kLaunchOpts[] = {
             // proxy switch + custom switch + (custom-only: N proxy rows
             // + "Add proxy" row) + status
             return self.customProxyEnabled ? (3 + (NSInteger)self.proxies.count + 1) : 3;
-        case 2: return 3;  // emotes toggle + hide-7TV-button toggle + reload-emotes action
-        case 3: return 3;  // launch dropdown + hide-stories toggle + watch-limit toggle
+        case 2: return [self emotesRowCount];  // see emotesRowCount
+        case 3: return 4;  // launch dropdown + hide-stories + hide-recaps-bar + watch-limit
         case 4: return 3;  // Tools: export, import, diagnostics
         case 5: return 0;  // version footer only
         default: return 0;
@@ -337,6 +337,22 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                              on:[tweakDefaults boolForKey:TWABKeyHidePickerButton]
                                          action:@selector(hidePickerButtonSwitchChanged:)
                                      identifier:@"HidePickerButtonSwitch"];
+            if (indexPath.row == 2)
+                return [self switchCellWithTitle:LOC(@"settings.keepdeleted.title",
+                                                     @"Keep Deleted Messages")
+                                        subtitle:LOC(@"settings.keepdeleted.desc",
+                                                     @"Keep messages moderators delete, and messages from timed-out or banned users, with a note saying what happened.")
+                                             on:[tweakDefaults boolForKey:TWABKeyKeepDeletedMessages]
+                                         action:@selector(keepDeletedSwitchChanged:)
+                                     identifier:@"KeepDeletedSwitch"];
+            if (indexPath.row == 3 && [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages])
+                return [self switchCellWithTitle:LOC(@"settings.highlightdeleted.title",
+                                                     @"Highlight Notes")
+                                        subtitle:LOC(@"settings.highlightdeleted.desc",
+                                                     @"Show the deleted / timed-out / banned notes with a highlighted background so they stand out.")
+                                             on:[tweakDefaults boolForKey:TWABKeyHighlightDeletedNotes]
+                                         action:@selector(highlightDeletedSwitchChanged:)
+                                     identifier:@"HighlightDeletedSwitch"];
             return [self actionCellWithTitle:LOC(@"settings.emotes.reload", @"Reload Emotes")
                                     subtitle:LOC(@"settings.emotes.reload.desc",
                                                  @"Clear the cache and re-fetch all emote sets.")
@@ -351,6 +367,14 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                              on:[tweakDefaults boolForKey:TWABKeyHideStories]
                                          action:@selector(hideStoriesSwitchChanged:)
                                      identifier:@"HideStoriesSwitch"];
+            if (indexPath.row == 2)
+                return [self switchCellWithTitle:LOC(@"settings.hiderecapsbar.title",
+                                                     @"Hide “From Channels You Follow”")
+                                        subtitle:LOC(@"settings.hiderecapsbar.desc",
+                                                     @"Remove the bar of clips and recaps from channels you follow above the live channels on the Live page.")
+                                             on:[tweakDefaults boolForKey:TWABKeyHideRecapsBar]
+                                         action:@selector(hideRecapsBarSwitchChanged:)
+                                     identifier:@"HideRecapsBarSwitch"];
             return [self switchCellWithTitle:LOC(@"settings.watchlimit.title",
                                                  @"Keep Live Feed Playing")
                                     subtitle:LOC(@"settings.watchlimit.desc",
@@ -427,7 +451,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                       withRowAnimation:UITableViewRowAnimationAutomatic];
         return;
     }
-    if (indexPath.section == 2 && indexPath.row == 2) {
+    if (indexPath.section == 2 && indexPath.row == [self emotesRowCount] - 1) {
         [self reloadEmotesTapped:[tableView cellForRowAtIndexPath:indexPath]];
         return;
     }
@@ -875,8 +899,31 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     if (sw.on) [self refreshProxyStatus];
 }
 
+// Emotes section rows: 3rd-party emotes, hide 7TV bar, keep deleted messages,
+// [highlight notes — only while keep deleted messages is on], reload emotes
+// (always last).
+- (NSInteger)emotesRowCount {
+    return [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 5 : 4;
+}
+
+- (void)keepDeletedSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyKeepDeletedMessages];
+    // Show / hide the Highlight Notes sub-setting under it.
+    NSIndexPath *sub = [NSIndexPath indexPathForRow:3 inSection:2];
+    if (sw.on) [self.tableView insertRowsAtIndexPaths:@[sub] withRowAnimation:UITableViewRowAnimationFade];
+    else       [self.tableView deleteRowsAtIndexPaths:@[sub] withRowAnimation:UITableViewRowAnimationFade];
+}
+
+- (void)highlightDeletedSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHighlightDeletedNotes];
+}
+
 - (void)hidePickerButtonSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHidePickerButton];
+}
+
+- (void)hideRecapsBarSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideRecapsBar];
 }
 
 - (void)hideStoriesSwitchChanged:(UISwitch *)sw {
@@ -901,7 +948,9 @@ static NSArray<NSString *> *twab_exportKeys(void) {
               TWABKeyAdBlockCustomProxyEnabled, TWABKeyAdBlockProxy,
               TWABKeyEmotesEnabled, TWABKeyLaunchTab, TWABKeyLaunchSubTab,
               TWABKeyHideStories, TWABKeyDisableWatchLimit,
-              TWABKeyHideAdFreeButton, TWABKeyHidePickerButton ];
+              TWABKeyHideAdFreeButton, TWABKeyHidePickerButton,
+              TWABKeyKeepDeletedMessages, TWABKeyHighlightDeletedNotes,
+              TWABKeyHideRecapsBar ];
 }
 
 - (void)reloadEmotesTapped:(UIView *)anchor {

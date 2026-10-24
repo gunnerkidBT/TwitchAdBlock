@@ -786,13 +786,90 @@ typedef void (^twab_recvHandler)(NSURLSessionWebSocketMessage *, NSError *);
 
 static char twab_handlerWrappedKey;
 
+// ─── Keep Deleted Messages ───────────────────────────────────────────────────
+// A moderator deleting a message arrives as CLEARMSG (target-msg-id); a
+// timeout / ban as CLEARCHAT with a target user (ban-duration present for
+// timeouts); a full chat clear as CLEARCHAT with no user. With the setting
+// on, these never reach Twitch's chat — so nothing gets removed — and a
+// NOTICE system line saying what happened takes their place.
+static NSString *twab_formatDuration(NSInteger secs) {
+    if (secs < 60) return [NSString stringWithFormat:@"%lds", (long)secs];
+    if (secs < 3600) return [NSString stringWithFormat:@"%ldm", (long)(secs / 60)];
+    if (secs < 86400) return [NSString stringWithFormat:@"%ldh", (long)(secs / 3600)];
+    return [NSString stringWithFormat:@"%ldd", (long)(secs / 86400)];
+}
+
+// Returns the NOTICE line replacing a moderation command, or nil if `line`
+// isn't one.
+static NSString *twab_moderationNotice(NSString *line) {
+    NSString *tags = @"", *rest = line;
+    if ([line hasPrefix:@"@"]) {
+        NSRange sp = [line rangeOfString:@" "];
+        if (sp.location == NSNotFound) return nil;
+        tags = [line substringWithRange:NSMakeRange(1, sp.location - 1)];
+        rest = [line substringFromIndex:sp.location + 1];
+    }
+    BOOL isMsg = [rest rangeOfString:@" CLEARMSG #"].location != NSNotFound;
+    BOOL isChat = !isMsg && [rest rangeOfString:@" CLEARCHAT #"].location != NSNotFound;
+    if (!isMsg && !isChat) return nil;
+
+    NSString *cmd = isMsg ? @" CLEARMSG #" : @" CLEARCHAT #";
+    NSString *afterCmd = [rest substringFromIndex:NSMaxRange([rest rangeOfString:cmd])];
+    NSRange colon = [afterCmd rangeOfString:@" :"];
+    NSString *channel = colon.location == NSNotFound ? afterCmd : [afterCmd substringToIndex:colon.location];
+    NSString *trailing = colon.location == NSNotFound ? nil : [afterCmd substringFromIndex:NSMaxRange(colon)];
+    channel = [channel stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    if (!channel.length) return nil;
+
+    NSString *text;
+    if (isMsg) {
+        NSString *login = twab_extractTag(tags, @"login") ?: @"someone";
+        NSString *msg = trailing ?: @"";
+        if (msg.length > 200) msg = [[msg substringToIndex:200] stringByAppendingString:@"…"];
+        text = msg.length ? [NSString stringWithFormat:@"🛡 %@'s message was deleted: %@", login, msg]
+                          : [NSString stringWithFormat:@"🛡 A message from %@ was deleted", login];
+    } else if (trailing.length) {
+        NSString *dur = twab_extractTag(tags, @"ban-duration");
+        text = dur.length ? [NSString stringWithFormat:@"🛡 %@ was timed out for %@", trailing,
+                                twab_formatDuration(dur.integerValue)]
+                          : [NSString stringWithFormat:@"🛡 %@ was banned", trailing];
+    } else {
+        text = @"🛡 Chat was cleared by a moderator";
+    }
+    os_log(OS_LOG_DEFAULT, "[TWAB-Deleted] kept messages: %{public}@", text);
+    // Sent as a chat message from "TwitchMods" tagged msg-id=highlighted-message,
+    // so Twitch draws it with the channel-points "Highlight My Message"
+    // background — it stands out from normal chat. (A plain NOTICE rendered,
+    // but with no background.) room-id / timestamp come from the moderation
+    // command; the user-id is a fixed placeholder no real account uses.
+    // Settings → "Highlight Notes" off: plain system line, no background.
+    if (![tweakDefaults boolForKey:TWABKeyHighlightDeletedNotes])
+        return [NSString stringWithFormat:@"@msg-id=twab_moderation :tmi.twitch.tv NOTICE #%@ :%@", channel, text];
+    NSString *roomID = twab_extractTag(tags, @"room-id") ?: @"";
+    NSString *ts = twab_extractTag(tags, @"tmi-sent-ts") ?:
+        [NSString stringWithFormat:@"%lld", (long long)(NSDate.date.timeIntervalSince1970 * 1000)];
+    return [NSString stringWithFormat:
+        @"@badge-info=;badges=;color=#9146FF;display-name=TwitchMods;emotes=;first-msg=0;flags=;"
+        @"id=%@;mod=0;msg-id=highlighted-message;returning-chatter=0;room-id=%@;subscriber=0;"
+        @"tmi-sent-ts=%@;turbo=0;user-id=9999999999;user-type= "
+        @":twitchmods!twitchmods@twitchmods.tmi.twitch.tv PRIVMSG #%@ :%@",
+        NSUUID.UUID.UUIDString.lowercaseString, roomID, ts, channel, text];
+}
+
 // Rewrite one received chat text frame (one or more CRLF-separated IRC
 // lines). Returns the rewritten frame, or nil to deliver the original.
 // Shared by the native chat socket (NSURLSessionWebSocketTask) and the React
 // Native chat socket (SocketRocket, Twitch 31.x+). `path` is only for a
 // one-time log naming which chat implementation is live.
 static NSString *twab_rewriteIRCFrame(NSString *s, const char *path) {
-    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled] || !s.length) return nil;
+    BOOL emotes = [tweakDefaults boolForKey:TWABKeyEmotesEnabled];
+    BOOL keepDeleted = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages];
+    static int lastState = -1;
+    if (lastState != (int)keepDeleted) {
+        lastState = (int)keepDeleted;
+        os_log(OS_LOG_DEFAULT, "[TWAB-Deleted] Keep Deleted Messages is %{public}s", keepDeleted ? "ON" : "OFF");
+    }
+    if ((!emotes && !keepDeleted) || !s.length) return nil;
     // Fast bail for non-IRC frames. Twitch IRC lines always start with
     // `@` (tagged), `:` (prefixed), or a command word — for the chat
     // socket that's PING/PONG. Anything else is a different protocol
@@ -816,6 +893,9 @@ static NSString *twab_rewriteIRCFrame(NSString *s, const char *path) {
     NSMutableArray<NSString *> *out = [NSMutableArray arrayWithCapacity:lines.count];
     BOOL changed = NO;
     for (NSString *line in lines) {
+        NSString *notice = keepDeleted ? twab_moderationNotice(line) : nil;
+        if (notice) { [out addObject:notice]; changed = YES; continue; }
+        if (!emotes) { [out addObject:line]; continue; }
         twab_observeIRCLine(line);  // ROOMSTATE preload
         NSString *mod = twab_injectIRCEmotes(line);
         if (mod) { [out addObject:mod]; changed = YES; }

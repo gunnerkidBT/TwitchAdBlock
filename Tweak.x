@@ -372,7 +372,9 @@ static NSData *twab_filteredFeedData(id delegate, NSData *data, NSURLSessionData
   // Ad-block (ad strip, watch limit) and Hide Stories (empties the Stories
   // shelf response) both filter here; each is gated inside on its own toggle.
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled] &&
-      ![tweakDefaults boolForKey:TWABKeyHideStories]) return data;
+      ![tweakDefaults boolForKey:TWABKeyHideStories] &&
+      ![tweakDefaults boolForKey:TWABKeyHideRecapsBar] &&
+      ![tweakDefaults boolForKey:TWABKeyHideAdFreeButton]) return data;
   return [data twab_responseDataForRequest:dataTask.currentRequest];
 }
 

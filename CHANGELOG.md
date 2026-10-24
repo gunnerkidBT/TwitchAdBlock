@@ -5,6 +5,25 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.15 — October 24, 2026
+
+**See what moderators delete.** Turn on **Keep Deleted Messages** in
+Settings → Emotes. When a moderator deletes a message, or times out or bans
+someone, their messages stay in chat instead of disappearing, and a short note
+like "🛡 ronni was timed out for 10m" shows up so you know what happened. Want
+the notes to stand out? Turn on **Highlight Notes**, which appears right under
+it, to give them a highlighted background. Both are off by default. It only
+works for things that happen while you're in chat.
+
+**Hide the "From channels you follow" bar.** Turn on **Hide "From Channels
+You Follow"** in Settings → Home to remove the row of clips and recaps above the
+live channels on the Live page.
+
+**The "Go Ad-Free" button on the Following tab is hidden again.** Twitch 31.7
+rebuilt that tab, so the old way of hiding it stopped working.
+
+---
+
 ## v0.1.14 — October 24, 2026
 
 **Works with Twitch 31.7.** This is a big Twitch update: parts of the app are
