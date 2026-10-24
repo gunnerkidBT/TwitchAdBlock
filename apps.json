@@ -1,0 +1,92 @@
+{
+  "name": "TwitchMods",
+  "identifier": "com.gunnerkidbt.twitchmods",
+  "subtitle": "Ad-free Twitch with 7TV, BTTV & FFZ emotes",
+  "description": "A modified Twitch app that blocks ads and adds some handy extras.\n\n• Blocks pre-roll ads on live streams and VODs, plus feed banners, sponsor spots and the \"Go Ad-Free\" button\n• Shows 7TV, BetterTTV and FrankerFaceZ emotes in chat — and lets you send them\n• Keeps the Live feed playing, hides Stories, picks your launch screen\n\nOpen TwitchMods from your account menu to switch each feature on or off.\n\nUnofficial fork of level3tjg's TwitchAdBlock. Not affiliated with Twitch.",
+  "iconURL": "https://raw.githubusercontent.com/gunnerkidBT/TwitchAdBlock/master/assets/icon.png",
+  "website": "https://github.com/gunnerkidBT/TwitchAdBlock",
+  "tintColor": "9146FF",
+  "featuredApps": [
+    "tv.twitch"
+  ],
+  "apps": [
+    {
+      "name": "TwitchMods",
+      "bundleIdentifier": "tv.twitch",
+      "developerName": "gunnerkidBT",
+      "subtitle": "Ad-free Twitch with 7TV, BTTV & FFZ emotes",
+      "localizedDescription": "A modified Twitch app that blocks ads and adds some handy extras.\n\n• Blocks pre-roll ads on live streams and VODs, plus feed banners, sponsor spots and the \"Go Ad-Free\" button\n• Shows 7TV, BetterTTV and FrankerFaceZ emotes in chat — and lets you send them\n• Keeps the Live feed playing, hides Stories, picks your launch screen\n\nOpen TwitchMods from your account menu to switch each feature on or off.\n\nUnofficial fork of level3tjg's TwitchAdBlock. Not affiliated with Twitch.",
+      "iconURL": "https://raw.githubusercontent.com/gunnerkidBT/TwitchAdBlock/master/assets/icon.png",
+      "tintColor": "9146FF",
+      "category": "entertainment",
+      "versions": [
+        {
+          "version": "31.7",
+          "buildVersion": "262892206363475379",
+          "date": "2026-10-24T15:02:57Z",
+          "localizedDescription": "TwitchMods 0.1.14 for Twitch 31.7\n\n**Works with Twitch 31.7.** This is a big Twitch update: parts of the app are now built differently under the hood. Ad-blocking, 3rd-party emotes, the Following tab's ad cleanup, **Keep Live Feed Playing**, **Hide Twitch Stories** and your **default launch screen** have all been updated to keep working with it. Also fixed: the app crashing when you scrolled down to TwitchMods in Settings.\n\n**You can now send 7TV, BetterTTV and FrankerFaceZ emotes, not just see them.** When you tap into chat to type, a **7TV** bar appears just above the keyboard (on older versions of Twitch's chat it's a 7TV button next to Twitch's own emote button instead). Tap it to see all the emotes for the channel you're watching, plus the global ones. Animated emotes move in the picker, just like in chat. Search by name, tap one, and it's typed into your message. Your most recent picks show up at the top. Anyone in chat who uses 7TV, BTTV or FFZ (or this mod) sees the emote.\n\nYou can also **press and hold Twitch's own emote button** to open the same picker. If you'd rather not have the bar, turn on **Hide 7TV Bar** in Settings → Emotes. Press-and-hold keeps working. Turning off **3rd-Party Emotes** removes both.\n\n**Get updates automatically in AltStore, SideStore or Feather.** Add this source and the app will tell you when a new TwitchMods version is out, even when only the mod changed and the Twitch version stayed the same: `https://raw.githubusercontent.com/gunnerkidBT/TwitchAdBlock/master/apps.json`\n\n(Heads up: your *own* message still shows the emote as its name on your screen. Twitch draws your messages itself, so the mod can't swap in the picture there. Everyone else sees the picture.)",
+          "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.7-0.1.14/tv.twitch-31.7-TwitchAdBlock-0.1.14.ipa",
+          "size": 197795047,
+          "minOSVersion": "16.4"
+        },
+        {
+          "version": "30.7",
+          "buildVersion": "262192325377749654",
+          "date": "2026-08-14T02:22:46Z",
+          "localizedDescription": "TwitchMods 0.1.13 for Twitch 30.7\n\n**Casting and AirPlay to a TV now work with ad-blocking on.** Before, having the ad-block proxy turned on could make casting to a Chromecast crash after a few seconds, or make AirPlay to an Apple TV show \"offline.\" Now the mod automatically steps aside while you're actually casting or AirPlaying, so the stream plays on the TV normally — and your phone goes right back to blocking ads the moment you stop. (The stream playing *on the TV* still shows ads — that part can't be blocked, since the TV fetches the video itself — but your phone stays ad-free.)",
+          "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v30.7-0.1.13/tv.twitch-30.7-TwitchAdBlock-0.1.13.ipa",
+          "size": 152372292,
+          "minOSVersion": "16.4"
+        },
+        {
+          "version": "30.2",
+          "buildVersion": "261812041368838592",
+          "date": "2026-07-07T13:11:17Z",
+          "localizedDescription": "TwitchMods 0.1.12 for Twitch 30.2\n\nUpdated to run on the latest Twitch app (**30.2**). No feature changes — just making sure everything keeps working after Twitch's update. (Same v0.1.12 features as below.)",
+          "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v30.2-0.1.12/tv.twitch-30.2-TwitchAdBlock-0.1.12.ipa",
+          "size": 151558997,
+          "minOSVersion": "16.4"
+        },
+        {
+          "version": "29.9",
+          "buildVersion": "261632356408703018",
+          "date": "2026-06-25T18:43:28Z",
+          "localizedDescription": "TwitchMods 0.1.12 for Twitch 29.9\n\n**The Live tab keeps playing now.** It used to stop the stream after a while and force you to tap *Watch* or *Follow* to keep going. That's gone — live streams just keep playing. (On by default. Toggle: Home & Playback → \"Keep Live Feed Playing\".)\n\n**Hid the \"Go Ad-Free\" button.** The Turbo upsell banner that shows up on the Following tab is now hidden. (On by default. Toggle: Ad Blocking → Hide \"Go Ad-Free\" Button.)\n\n**Blocks a few more ads.** Added blocking for streamer-read sponsor ad spots, and improved the behind-the-scenes detection so new kinds of ads are easier to catch in the future.\n\n**New \"Reload Emotes\" button.** If a streamer adds new 7TV/BTTV/FFZ emotes while you're watching, you can now refresh them without restarting the app. (Settings → Emotes → Reload Emotes.)\n\n**Back up and restore your settings.** You can now export all your settings (toggles + proxy list) to a file and import it back later — handy when you have to reinstall. Export saves a dated file like `TwitchMods-Settings-2026-06-25.json`; import lets you pick that file. (Settings → Tools.)\n\n**New Diagnostics screen.** Shows a quick green/red checklist of whether the mod's features still work on your version of Twitch — useful for spotting when a Twitch update breaks something. (Settings → Tools → Diagnostics.)\n\n**Settings are easier to read.** Each option now has a short description right underneath it, and everything is grouped under clear headings (Ad Blocking, Proxy, Emotes, Home & Playback, Tools).",
+          "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v29.9-0.1.12/tv.twitch-29.9-TwitchAdBlock-0.1.12.ipa",
+          "size": 147998485,
+          "minOSVersion": "16.4"
+        }
+      ],
+      "appPermissions": {
+        "entitlements": [
+          "application-identifier",
+          "aps-environment",
+          "com.apple.developer.applesignin",
+          "com.apple.developer.associated-domains",
+          "com.apple.developer.declared-age-range",
+          "com.apple.developer.group-session",
+          "com.apple.developer.networking.wifi-info",
+          "com.apple.developer.storekit.request-data",
+          "com.apple.developer.team-identifier",
+          "com.apple.developer.usernotifications.communication",
+          "com.apple.developer.usernotifications.time-sensitive",
+          "com.apple.security.application-groups",
+          "keychain-access-groups"
+        ],
+        "privacy": {
+          "NSCameraUsageDescription": "Twitch needs permission to access the camera on this device to stream live video and change your profile image.",
+          "NSLocalNetworkUsageDescription": "Twitch uses the local network to discover Cast-enabled devices on your WiFi network.",
+          "NSMicrophoneUsageDescription": "Twitch needs permission to access the microphone on this device to stream live video.",
+          "NSPhotoLibraryAddUsageDescription": "Twitch needs permission to write to your photo library in order to save images.",
+          "NSUserTrackingUsageDescription": "Your iOS advertising ID and device data will be used to support creators and provide a personal ad experience."
+        }
+      },
+      "version": "31.7",
+      "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.7-0.1.14/tv.twitch-31.7-TwitchAdBlock-0.1.14.ipa",
+      "size": 197795047,
+      "versionDate": "2026-10-24T15:02:57Z",
+      "versionDescription": "TwitchMods 0.1.14 for Twitch 31.7\n\n**Works with Twitch 31.7.** This is a big Twitch update: parts of the app are now built differently under the hood. Ad-blocking, 3rd-party emotes, the Following tab's ad cleanup, **Keep Live Feed Playing**, **Hide Twitch Stories** and your **default launch screen** have all been updated to keep working with it. Also fixed: the app crashing when you scrolled down to TwitchMods in Settings.\n\n**You can now send 7TV, BetterTTV and FrankerFaceZ emotes, not just see them.** When you tap into chat to type, a **7TV** bar appears just above the keyboard (on older versions of Twitch's chat it's a 7TV button next to Twitch's own emote button instead). Tap it to see all the emotes for the channel you're watching, plus the global ones. Animated emotes move in the picker, just like in chat. Search by name, tap one, and it's typed into your message. Your most recent picks show up at the top. Anyone in chat who uses 7TV, BTTV or FFZ (or this mod) sees the emote.\n\nYou can also **press and hold Twitch's own emote button** to open the same picker. If you'd rather not have the bar, turn on **Hide 7TV Bar** in Settings → Emotes. Press-and-hold keeps working. Turning off **3rd-Party Emotes** removes both.\n\n**Get updates automatically in AltStore, SideStore or Feather.** Add this source and the app will tell you when a new TwitchMods version is out, even when only the mod changed and the Twitch version stayed the same: `https://raw.githubusercontent.com/gunnerkidBT/TwitchAdBlock/master/apps.json`\n\n(Heads up: your *own* message still shows the emote as its name on your screen. Twitch draws your messages itself, so the mod can't swap in the picture there. Everyone else sees the picture.)"
+    }
+  ],
+  "news": []
+}
