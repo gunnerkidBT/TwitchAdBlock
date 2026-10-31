@@ -3,6 +3,7 @@
 #import <objc/message.h>
 #import <stdatomic.h>
 #import <AVFoundation/AVFoundation.h>
+#import <ImageIO/ImageIO.h>
 #import "Tweak.h"
 #import "SettingsKeys.h"
 
@@ -367,15 +368,209 @@ static NSData *twab_rewriteWatchLimitBytes(NSData *data, NSURLRequest *request, 
   return changed ? [out dataUsingEncoding:NSUTF8StringEncoding] : data;
 }
 
+// ─── Wide 3rd-party emotes ──────────────────────────────────────────────────
+// Twitch draws every chat emote into a fixed square box (React Native's
+// EMOTE_SIZE; the native Swift chat does the same), stretching wide 7TV/BTTV/
+// FFZ emotes into squished squares. We can't widen the box, but we control the
+// image: wide (or tall) emotes are redrawn centred on a transparent square, so
+// the square box shows them at their true proportions — smaller, not
+// distorted. Animated GIFs are padded frame-by-frame, keeping their timing.
+static BOOL twab_isEmoteImageRequest(NSURLRequest *req) {
+  NSString *host = req.URL.host;
+  return [host isEqualToString:@"cdn.7tv.app"] || [host isEqualToString:@"cdn.betterttv.net"] ||
+         [host isEqualToString:@"cdn.frankerfacez.com"];
+}
+
+// Returns the padded image, or nil to keep the original (already ~square,
+// not an image, or anything failed).
+static NSData *twab_padEmoteToSquare(NSData *data) {
+  CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+  if (!src) return nil;
+  size_t count = CGImageSourceGetCount(src);
+  CGImageRef first = count ? CGImageSourceCreateImageAtIndex(src, 0, NULL) : NULL;
+  if (!first) { CFRelease(src); return nil; }
+  size_t w = CGImageGetWidth(first), h = CGImageGetHeight(first);
+  CGImageRelease(first);
+  // Within ~10% of square already looks fine stretched.
+  if (!w || !h || (w * 10 <= h * 11 && h * 10 <= w * 11)) { CFRelease(src); return nil; }
+  size_t side = MAX(w, h);
+  BOOL animated = count > 1;
+  NSMutableData *out = [NSMutableData data];
+  CGImageDestinationRef dst = CGImageDestinationCreateWithData((__bridge CFMutableDataRef)out,
+      animated ? CFSTR("com.compuserve.gif") : CFSTR("public.png"), count, NULL);
+  if (!dst) { CFRelease(src); return nil; }
+  if (animated) {
+    NSDictionary *props = CFBridgingRelease(CGImageSourceCopyProperties(src, NULL));
+    NSNumber *loops = props[(id)kCGImagePropertyGIFDictionary][(id)kCGImagePropertyGIFLoopCount] ?: @0;
+    CGImageDestinationSetProperties(dst, (__bridge CFDictionaryRef)@{
+      (id)kCGImagePropertyGIFDictionary: @{ (id)kCGImagePropertyGIFLoopCount: loops } });
+  }
+  CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+  for (size_t i = 0; i < count; i++) {
+    CGImageRef frame = CGImageSourceCreateImageAtIndex(src, i, NULL);
+    if (!frame) continue;
+    CGContextRef ctx = CGBitmapContextCreate(NULL, side, side, 8, 0, cs,
+                                             (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+    if (ctx) {
+      size_t fw = CGImageGetWidth(frame), fh = CGImageGetHeight(frame);
+      CGContextDrawImage(ctx, CGRectMake((side - fw) / 2.0, (side - fh) / 2.0, fw, fh), frame);
+      CGImageRef padded = CGBitmapContextCreateImage(ctx);
+      NSDictionary *frameProps = nil;
+      if (animated) {
+        NSDictionary *fp = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(src, i, NULL));
+        NSDictionary *gif = fp[(id)kCGImagePropertyGIFDictionary];
+        NSNumber *delay = gif[(id)kCGImagePropertyGIFUnclampedDelayTime] ?:
+                          gif[(id)kCGImagePropertyGIFDelayTime] ?: @0.1;
+        frameProps = @{ (id)kCGImagePropertyGIFDictionary: @{ (id)kCGImagePropertyGIFDelayTime: delay } };
+      }
+      if (padded) {
+        CGImageDestinationAddImage(dst, padded, (__bridge CFDictionaryRef)frameProps);
+        CGImageRelease(padded);
+      }
+      CGContextRelease(ctx);
+    }
+    CGImageRelease(frame);
+  }
+  CGColorSpaceRelease(cs);
+  BOOL ok = CGImageDestinationFinalize(dst);
+  CFRelease(dst);
+  CFRelease(src);
+  if (!ok || !out.length) return nil;
+  os_log(OS_LOG_DEFAULT, "[TWAB-Emote] padded %zux%zu%{public}s emote to %zux%zu", w, h,
+         animated ? " animated" : "", side, side);
+  return out;
+}
+
+// Twitch's chat fetches the same emote image several times in a row; cache
+// the result per URL (padded bytes, or NSNull = "leave as is"). NSCache is
+// thread-safe, so lookups happen on the network queue and fills off it.
+static NSCache *twab_emoteFitCache(void) {
+  static NSCache *cache;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 400; });
+  return cache;
+}
+
+// Cached result for `url`, or nil if not computed yet.
+static NSData *twab_cachedFitEmote(NSURL *url, NSData *data) {
+  id hit = url ? [twab_emoteFitCache() objectForKey:url] : nil;
+  if (!hit) return nil;
+  return hit == (id)kCFNull ? data : hit;
+}
+
+static NSData *twab_fitEmoteImage(NSURL *url, NSData *data) {
+  NSData *cached = twab_cachedFitEmote(url, data);
+  if (cached) return cached;
+  NSData *padded = twab_padEmoteToSquare(data);
+  if (url) [twab_emoteFitCache() setObject:padded ?: (id)kCFNull forKey:url];
+  return padded ?: data;
+}
+
+// Delegate path: emote images arrive in chunks; hold them until the task
+// completes, then deliver the (padded) whole image in one go.
+static char twab_emoteBufferKey, twab_emoteFlushingKey, twab_emoteStartKey, twab_wholeResponseHeldKey;
+
+// Hide Leaderboard: this response can arrive in several chunks, which can't be
+// edited one at a time, so it's held like an emote image and edited whole at completion.
+static BOOL twab_requestNamesOperation(NSURLRequest *request, NSString *operation) {
+  if (![request.URL.host isEqualToString:@"gql.twitch.tv"] || !request.HTTPBody) return NO;
+  NSString *quoted = [NSString stringWithFormat:@"\"%@\"", operation];
+  NSData *needle = [quoted dataUsingEncoding:NSUTF8StringEncoding];
+  return [request.HTTPBody rangeOfData:needle options:0 range:NSMakeRange(0, request.HTTPBody.length)].location != NSNotFound;
+}
+
+static NSData *twab_bufferEmoteChunk(NSData *data, NSURLSessionDataTask *task) {
+  NSMutableData *buf = objc_getAssociatedObject(task, &twab_emoteBufferKey);
+  if (!buf) {
+    buf = [NSMutableData data];
+    objc_setAssociatedObject(task, &twab_emoteBufferKey, buf, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(task, &twab_emoteStartKey, @(CFAbsoluteTimeGetCurrent()),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+  [buf appendData:data];
+  return [NSData data];
+}
+
+static void twab_deliverEmote(id delegate, NSURLSession *session, NSURLSessionTask *task, NSData *out) {
+  if (!out.length) return;
+  objc_setAssociatedObject(task, &twab_emoteFlushingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  ((void (*)(id, SEL, NSURLSession *, NSURLSessionDataTask *, NSData *))objc_msgSend)(
+      delegate, @selector(URLSession:dataTask:didReceiveData:), session, (NSURLSessionDataTask *)task, out);
+  objc_setAssociatedObject(task, &twab_emoteFlushingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+// Called from didCompleteWithError:. Returns NO if nothing was held (caller
+// completes normally). Otherwise the held image is delivered and then
+// `complete` (the original didCompleteWithError:) runs:
+//  - cached / nothing to do → right now, on this queue;
+//  - needs padding → padded on a background queue, then delivered + completed
+//    on the session's delegate queue. Padding an animated GIF takes a moment;
+//    doing it inline used to stall the delegate queue — and with it every
+//    other image in a fast chat.
+static BOOL twab_completeHeldEmote(id delegate, NSURLSession *session, NSURLSessionTask *task,
+                                   void (^complete)(void)) {
+  NSMutableData *buf = objc_getAssociatedObject(task, &twab_emoteBufferKey);
+  if (!buf || ![task isKindOfClass:NSURLSessionDataTask.class]) return NO;
+  objc_setAssociatedObject(task, &twab_emoteBufferKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  if (objc_getAssociatedObject(task, &twab_wholeResponseHeldKey)) {
+    NSData *edited = [buf twab_dataHidingLeaderboardsForRequest:task.originalRequest];
+    edited = twab_rewriteWatchLimitBytes(edited, task.currentRequest, NSStringFromClass([delegate class]));
+    edited = [edited twab_responseDataForRequest:task.currentRequest hideTurboOffers:YES];
+    twab_deliverEmote(delegate, session, task, edited);
+    complete();
+    return YES;
+  }
+  NSURL *url = task.originalRequest.URL;
+  CFAbsoluteTime start = [objc_getAssociatedObject(task, &twab_emoteStartKey) doubleValue];
+  NSData *cached = buf.length ? twab_cachedFitEmote(url, buf) : buf;
+  if (cached) {
+    twab_deliverEmote(delegate, session, task, cached);
+    complete();
+    return YES;
+  }
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    CFAbsoluteTime padStart = CFAbsoluteTimeGetCurrent();
+    NSData *out = twab_fitEmoteImage(url, buf);
+    CFAbsoluteTime padMs = (CFAbsoluteTimeGetCurrent() - padStart) * 1000;
+    void (^finish)(void) = ^{
+      twab_deliverEmote(delegate, session, task, out);
+      complete();
+      CFAbsoluteTime totalMs = start ? (CFAbsoluteTimeGetCurrent() - start) * 1000 : 0;
+      if (totalMs > 250)
+        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] slow emote: %.0f ms from first byte to delivery (padding %.0f ms) %{public}@",
+               totalMs, padMs, url.lastPathComponent ?: @"");
+    };
+    NSOperationQueue *q = session.delegateQueue;
+    if (q) [q addOperationWithBlock:finish];
+    else finish();
+  });
+  return YES;
+}
+
 static NSData *twab_filteredFeedData(id delegate, NSData *data, NSURLSessionDataTask *dataTask) {
+  // Wide emotes: hold 7TV/BTTV/FFZ image chunks for padding at completion
+  // (only for delegates that tell us about completion, or nothing would flush).
+  if (!objc_getAssociatedObject(dataTask, &twab_emoteFlushingKey) &&
+      [tweakDefaults boolForKey:TWABKeyEmotesEnabled] &&
+      [tweakDefaults boolForKey:TWABKeyFitWideEmotes] &&
+      twab_isEmoteImageRequest(dataTask.originalRequest) &&
+      [delegate respondsToSelector:@selector(URLSession:task:didCompleteWithError:)])
+    return twab_bufferEmoteChunk(data, dataTask);
+  if (objc_getAssociatedObject(dataTask, &twab_emoteFlushingKey)) return data;
+  if ([delegate isKindOfClass:objc_getClass("RCTHTTPRequestHandler")] &&
+      [tweakDefaults boolForKey:TWABKeyHideLeaderboard] &&
+      twab_requestNamesOperation(dataTask.originalRequest, @"ChannelLeaderboards")) {
+    objc_setAssociatedObject(dataTask, &twab_wholeResponseHeldKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return twab_bufferEmoteChunk(data, dataTask);
+  }
   data = twab_rewriteWatchLimitBytes(data, dataTask.currentRequest, NSStringFromClass([delegate class]));
   // Ad-block (ad strip, watch limit) and Hide Stories (empties the Stories
   // shelf response) both filter here; each is gated inside on its own toggle.
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled] &&
       ![tweakDefaults boolForKey:TWABKeyHideStories] &&
-      ![tweakDefaults boolForKey:TWABKeyHideRecapsBar] &&
       ![tweakDefaults boolForKey:TWABKeyHideAdFreeButton]) return data;
-  return [data twab_responseDataForRequest:dataTask.currentRequest];
+  return [data twab_responseDataForRequest:dataTask.currentRequest
+                           hideTurboOffers:[delegate isKindOfClass:objc_getClass("RCTHTTPRequestHandler")]];
 }
 
 // Keep Live Feed Playing — the native feed prefetch (31.x). The React Native
@@ -485,6 +680,20 @@ typedef void (^twab_dataCompletion)(NSData *, NSURLResponse *, NSError *);
 static twab_dataCompletion twab_wrapWatchCompletion(NSURLRequest *request, twab_dataCompletion handler) {
   if (!handler) return handler;
   return ^(NSData *data, NSURLResponse *response, NSError *error) {
+    if (data && [tweakDefaults boolForKey:TWABKeyEmotesEnabled] &&
+        [tweakDefaults boolForKey:TWABKeyFitWideEmotes] && twab_isEmoteImageRequest(request)) {
+      // Wide 3rd-party emotes. Cached → now; otherwise pad off this queue
+      // and call back on it, so padding never stalls other responses.
+      NSData *cached = twab_cachedFitEmote(request.URL, data);
+      if (cached) { handler(cached, response, error); return; }
+      NSOperationQueue *back = NSOperationQueue.currentQueue;
+      dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSData *out = twab_fitEmoteImage(request.URL, data);
+        if (back) [back addOperationWithBlock:^{ handler(out, response, error); }];
+        else handler(out, response, error);
+      });
+      return;
+    }
     handler(data ? twab_rewriteWatchLimitBytes(data, request, @"completionHandler") : data, response, error);
   };
 }
@@ -502,6 +711,12 @@ static twab_dataCompletion twab_wrapWatchCompletion(NSURLRequest *request, twab_
     didReceiveData:(NSData *)data {
   %orig(session, dataTask, twab_filteredFeedData(self, data, dataTask));
 }
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
+    didCompleteWithError:(NSError *)error {
+  // Held wide-emote image: delivered (padded) first, then completion.
+  if (twab_completeHeldEmote(self, session, task, ^{ %orig; })) return;
+  %orig;
+}
 %end
 
 // Apollo.URLSessionClient — used in Twitch 29.x+
@@ -510,6 +725,12 @@ static twab_dataCompletion twab_wrapWatchCompletion(NSURLRequest *request, twab_
           dataTask:(NSURLSessionDataTask *)dataTask
     didReceiveData:(NSData *)data {
   %orig(session, dataTask, twab_filteredFeedData(self, data, dataTask));
+}
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
+    didCompleteWithError:(NSError *)error {
+  // Held wide-emote image: delivered (padded) first, then completion.
+  if (twab_completeHeldEmote(self, session, task, ^{ %orig; })) return;
+  %orig;
 }
 %end
 
@@ -521,6 +742,286 @@ static twab_dataCompletion twab_wrapWatchCompletion(NSURLRequest *request, twab_
           dataTask:(NSURLSessionDataTask *)dataTask
     didReceiveData:(NSData *)data {
   %orig(session, dataTask, twab_filteredFeedData(self, data, dataTask));
+}
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
+    didCompleteWithError:(NSError *)error {
+  // Held wide-emote image: delivered (padded) first, then completion.
+  if (twab_completeHeldEmote(self, session, task, ^{ %orig; })) return;
+  %orig;
+}
+%end
+
+// Declutter: stream-screen buttons, matched by their React Native testID. Twitch
+// reuses these views for other elements, so one we hid is restored on reuse.
+static char twab_declutterHiddenKey;
+
+static BOOL twab_shouldHideTestID(NSString *testID) {
+  if ([testID isEqualToString:@"subscribe-button"] || [testID isEqualToString:@"gift-button"])
+    return [tweakDefaults boolForKey:TWABKeyHideSubscribe];
+  if ([testID isEqualToString:@"chat-tray-button-bits"])
+    return [tweakDefaults boolForKey:TWABKeyHideBits];
+  if ([testID isEqualToString:@"channel-leaderboard-strip-pressable"])
+    return [tweakDefaults boolForKey:TWABKeyHideLeaderboard];
+  if ([testID isEqualToString:@"feed-recaps-shelf-absorb"])
+    return [tweakDefaults boolForKey:TWABKeyHideRecapsBar];
+  if ([testID isEqualToString:@"extensions-icon"])
+    return [tweakDefaults boolForKey:TWABKeyHideExtensions];
+  if ([testID isEqualToString:@"stage-inflow-metadata"])
+    return [tweakDefaults boolForKey:TWABKeyHideChannelBar];
+  return NO;
+}
+
+// Hide Channel Bar: React Native keeps the bar's space. Resizing chat fights its
+// layout and leaves touches outside the parent, so the message list stays where
+// it is and is allowed to draw upward into that space: rows above its top edge
+// are already mounted. A mask stops them at the video, and any banner above chat
+// moves up with it. The bar's height animates, so the banner tracks what was
+// applied and only adds the difference.
+static char twab_barShiftKey, twab_barCenterKey, twab_touchExtensionKey, twab_touchCutoffKey;
+
+static BOOL twab_isPanelOnlyTestID(NSString *testID) {
+  return [testID isEqualToString:@"channel-metadata"] ||
+         [testID isEqualToString:@"follow-button"] ||
+         [testID isEqualToString:@"gift-button"] ||
+         [testID isEqualToString:@"subscribe-button"] ||
+         [testID isEqualToString:@"extensions-icon"] ||
+         [testID hasPrefix:@"support-action-row-"] ||
+         [testID isEqualToString:@"channel-metadata-persistent-row"] ||
+         [testID isEqualToString:@"channel-metadata-actions"] ||
+         [testID hasPrefix:@"support-action-cell-"];
+}
+
+static UIView *twab_findTestID(UIView *root, NSString *testID, NSUInteger depth) {
+  if ([root.accessibilityIdentifier isEqualToString:testID]) return root;
+  if (depth == 0) return nil;
+  for (UIView *sub in root.subviews) {
+    UIView *found = twab_findTestID(sub, testID, depth - 1);
+    if (found) return found;
+  }
+  return nil;
+}
+
+static void twab_collectTestID(UIView *root, NSString *testID, NSUInteger depth, NSMutableArray *found) {
+  if ([root.accessibilityIdentifier isEqualToString:testID]) [found addObject:root];
+  if (depth == 0) return;
+  for (UIView *sub in root.subviews) twab_collectTestID(sub, testID, depth - 1, found);
+}
+
+// Moves a view that sits above chat (banner, pinned card) up by `shift`, adding
+// only the difference from what's already applied.
+static void twab_moveAboveChat(UIView *view, CGFloat shift) {
+  if (!view) return;
+  NSValue *last = objc_getAssociatedObject(view, &twab_barCenterKey);
+  BOOL untouched = last && CGPointEqualToPoint(last.CGPointValue, view.center);
+  CGFloat applied = untouched ? [objc_getAssociatedObject(view, &twab_barShiftKey) doubleValue] : 0;
+  CGFloat delta = shift - applied;
+  if (delta == 0) return;
+  CGPoint center = view.center;
+  center.y -= delta;
+  view.center = center;
+  objc_setAssociatedObject(view, &twab_barShiftKey, @(shift), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  objc_setAssociatedObject(view, &twab_barCenterKey, [NSValue valueWithCGPoint:view.center],
+                           OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void twab_collapseChannelBar(UIView *changed) {
+  UIView *layout = changed.superview;
+  while (layout && ![layout.accessibilityIdentifier isEqualToString:@"theatre-portrait-layout"])
+    layout = layout.superview;
+  if (!layout) return;  // landscape has no bar to make room for
+  UIView *bar = twab_findTestID(layout, @"stage-inflow-metadata", 8);
+  UIView *region = twab_findTestID(layout, @"chat-message-region", 20);
+  UIView *list = twab_findTestID(region, @"chat-message-list", 14);
+  if (!bar || !region || !list) return;
+  CGFloat height = bar.frame.size.height;
+
+  // Tapping the video opens the channel info panel, the way to reach Follow and
+  // the stream title with the bar gone. The panel's background and buttons are
+  // siblings of it rather than children (confirmed on-device), so each one is
+  // shown only while the panel is open. Closed, they'd cover chat.
+  UIView *panel = twab_findTestID(layout, @"channel-metadata-collapsible", 20);
+  BOOL panelOpen = panel.frame.size.height >= 1;
+  for (UIView *sub in panel.superview.subviews) {
+    NSString *subID = sub.accessibilityIdentifier;
+    if (twab_isPanelOnlyTestID(subID)) sub.hidden = !panelOpen || twab_shouldHideTestID(subID);
+  }
+  // Buttons can sit in unnamed parents (Follow moves into one when the panel closes),
+  // so they're also set directly. Each one's own switch still applies while open.
+  for (NSString *button in @[@"follow-button", @"gift-button", @"subscribe-button", @"extensions-icon"]) {
+    twab_findTestID(layout, button, 20).hidden = !panelOpen || twab_shouldHideTestID(button);
+  }
+
+  for (UIView *v = list; v && v != layout; v = v.superview) v.clipsToBounds = NO;
+  for (UIView *sub in list.subviews) {
+    if (![sub isKindOfClass:UIScrollView.class]) continue;
+    sub.clipsToBounds = NO;
+    objc_setAssociatedObject(sub, &twab_touchExtensionKey, @(height), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+  CALayer *mask = region.layer.mask;
+  if (!mask) {
+    mask = [CALayer layer];
+    mask.backgroundColor = UIColor.whiteColor.CGColor;
+    region.layer.mask = mask;
+    os_log(OS_LOG_DEFAULT, "[TWAB-Hide] chat drawing into channel bar space, bar height %.0f", height);
+  }
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  mask.frame = CGRectMake(0, -height, region.bounds.size.width, region.bounds.size.height + height);
+  [CATransaction commit];
+
+  // Pinned messages and offers live in chat-top-of-chat. With the panel open they
+  // stay in Twitch's own spot, below it, instead of sliding behind it.
+  CGFloat shift = panelOpen ? 0 : height;
+  NSMutableArray *banners = [NSMutableArray array];
+  twab_collectTestID(layout, @"chat-top-banner-carousel", 20, banners);
+  UIView *pinned = twab_findTestID(layout, @"chat-top-of-chat", 20);
+  // The visible strip is in a scroller beside the view named chat-top-banner-carousel,
+  // so it's their shared, same-sized parent that has to move (confirmed on-device).
+  NSMutableArray *moved = [NSMutableArray arrayWithObject:list];
+  for (UIView *banner in banners) {
+    UIView *parent = banner.superview;
+    BOOL sameSize = fabs(parent.bounds.size.height - banner.bounds.size.height) < 1;
+    UIView *box = sameSize && parent != layout ? parent : banner;
+    twab_moveAboveChat(box, shift);
+    [moved addObject:box];
+  }
+  twab_moveAboveChat(pinned, shift);
+
+  // The unnamed view holding the video and bar still spans the bar's space and
+  // swallowed taps there (confirmed on-device), so while the panel is closed it
+  // only takes touches on the video.
+  UIView *stage = bar;
+  while (stage.superview && stage.superview != layout) stage = stage.superview;
+  UIView *video = twab_findTestID(layout, @"theatre-video-zoom", 8);
+  NSNumber *cutoff = nil;
+  if (!panelOpen && video && [video isDescendantOfView:stage])
+    cutoff = @(CGRectGetMaxY([video convertRect:video.bounds toView:stage]));
+  objc_setAssociatedObject(stage, &twab_touchCutoffKey, cutoff, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+  // React Native drops touches outside a parent unless its own layout says a child
+  // overflows, so every parent of what moved takes touches that far up too.
+  objc_setAssociatedObject(list, &twab_touchExtensionKey, @(height), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  if (pinned) [moved addObject:pinned];
+  for (UIView *m in moved) {
+    for (UIView *v = m.superview; v && v != layout; v = v.superview)
+      objc_setAssociatedObject(v, &twab_touchExtensionKey, @(height), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+}
+
+static BOOL twab_pointInExtendedTop(UIView *view, CGPoint point) {
+  CGFloat extra = [objc_getAssociatedObject(view, &twab_touchExtensionKey) doubleValue];
+  if (extra <= 0) return NO;
+  CGRect bounds = view.bounds;
+  bounds.origin.y -= extra;
+  bounds.size.height += extra;
+  return CGRectContainsPoint(bounds, point);
+}
+
+static void twab_restoreDecluttered(UIView *view) {
+  if (!objc_getAssociatedObject(view, &twab_declutterHiddenKey)) return;
+  objc_setAssociatedObject(view, &twab_declutterHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  view.hidden = NO;
+}
+
+// Hide "From Channels You Follow": emptying the bar's data left the Live feed on
+// one channel until it was scrolled, so the data stays and the bar is hidden. Its
+// space is scrolled past and made unreachable with a negative top inset. Rows stay
+// where React Native put them, so Twitch's scroll position matches the screen and
+// autoplay starts in the right place.
+static char twab_feedTopKey;
+
+static void twab_shiftFeedRows(UIView *shelf, CGFloat height) {
+  UIView *list = shelf.superview;
+  while (list && ![list.accessibilityIdentifier isEqualToString:@"feed-list"]) list = list.superview;
+  for (UIView *sub in list.subviews) {
+    if (![sub isKindOfClass:UIScrollView.class]) continue;
+    UIScrollView *scroll = (UIScrollView *)sub;
+    objc_setAssociatedObject(scroll, &twab_feedTopKey, height > 0 ? @(height) : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIEdgeInsets inset = scroll.contentInset;
+    if (inset.top == -height) return;
+    inset.top = -height;
+    scroll.contentInset = inset;
+    if (scroll.contentOffset.y < height) scroll.contentOffset = CGPointMake(scroll.contentOffset.x, height);
+    os_log(OS_LOG_DEFAULT, "[TWAB-Shelf] scrolled Live feed past bar space, %.0f", height);
+    return;
+  }
+}
+
+%hook RCTViewComponentView
+- (void)setAccessibilityIdentifier:(NSString *)identifier {
+  %orig;
+  UIView *view = (UIView *)self;
+  // New buttons and banners aren't attached yet, so they're checked once they are.
+  if ((twab_isPanelOnlyTestID(identifier) || [identifier isEqualToString:@"chat-top-banner-carousel"] ||
+       [identifier isEqualToString:@"chat-top-of-chat"]) &&
+      [tweakDefaults boolForKey:TWABKeyHideChannelBar]) {
+    __weak UIView *weakNew = view;
+    dispatch_async(dispatch_get_main_queue(), ^{ twab_collapseChannelBar(weakNew); });
+  }
+  if (twab_shouldHideTestID(identifier)) {
+    objc_setAssociatedObject(view, &twab_declutterHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    view.hidden = YES;
+    os_log(OS_LOG_DEFAULT, "[TWAB-Hide] hid %{public}@", identifier);
+  } else {
+    twab_restoreDecluttered(view);
+  }
+}
+- (void)updateLayoutMetrics:(const void *)layoutMetrics oldLayoutMetrics:(const void *)oldLayoutMetrics {
+  %orig;
+  UIView *view = (UIView *)self;
+  // Layout can reset `hidden` from React Native's own display value.
+  if (objc_getAssociatedObject(view, &twab_declutterHiddenKey)) view.hidden = YES;
+  NSString *testID = view.accessibilityIdentifier;
+  if ([testID isEqualToString:@"feed-recaps-shelf-absorb"] && [tweakDefaults boolForKey:TWABKeyHideRecapsBar]) {
+    __weak UIView *weakShelf = view;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      UIView *shelf = weakShelf;
+      if (shelf) twab_shiftFeedRows(shelf, shelf.bounds.size.height);
+    });
+  }
+  if (([testID isEqualToString:@"stage-inflow-metadata"] ||
+       [testID isEqualToString:@"chat-message-region"] ||
+       [testID isEqualToString:@"channel-metadata-collapsible"] ||
+       twab_isPanelOnlyTestID(testID) ||
+       [testID isEqualToString:@"chat-top-of-chat"] ||
+       [testID isEqualToString:@"chat-top-banner-carousel"]) &&
+      [tweakDefaults boolForKey:TWABKeyHideChannelBar]) {
+    twab_collapseChannelBar(view);
+    __weak UIView *weakView = view;
+    dispatch_async(dispatch_get_main_queue(), ^{ twab_collapseChannelBar(weakView); });
+  }
+}
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+  NSNumber *cutoff = objc_getAssociatedObject(self, &twab_touchCutoffKey);
+  if (cutoff && point.y >= cutoff.doubleValue) return NO;
+  return %orig || twab_pointInExtendedTop((UIView *)self, point);
+}
+- (void)prepareForRecycle {
+  twab_restoreDecluttered((UIView *)self);
+  objc_setAssociatedObject(self, &twab_touchCutoffKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  objc_setAssociatedObject(self, &twab_touchExtensionKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  objc_setAssociatedObject(self, &twab_barShiftKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  objc_setAssociatedObject(self, &twab_barCenterKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  NSString *recycledID = ((UIView *)self).accessibilityIdentifier;
+  if ([recycledID isEqualToString:@"feed-recaps-shelf-absorb"]) twab_shiftFeedRows((UIView *)self, 0);
+  if ([recycledID isEqualToString:@"chat-message-region"]) ((UIView *)self).layer.mask = nil;
+  if (twab_isPanelOnlyTestID(recycledID)) ((UIView *)self).hidden = NO;
+  %orig;
+}
+%end
+
+%hook RCTEnhancedScrollView
+// Hide "From Channels You Follow": Twitch scrolling the feed to its top (e.g. on a new
+// category) stops below the bar's space. Finger drags and bounces are left alone.
+- (void)setContentOffset:(CGPoint)offset {
+  UIScrollView *scroll = (UIScrollView *)self;
+  CGFloat top = [objc_getAssociatedObject(self, &twab_feedTopKey) doubleValue];
+  if (top > 0 && offset.y < top && !scroll.tracking && !scroll.dragging && !scroll.decelerating) offset.y = top;
+  %orig(offset);
+}
+// Hide Channel Bar: drags in the space above the message list still scroll it.
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+  return %orig || twab_pointInExtendedTop((UIView *)self, point);
 }
 %end
 
@@ -611,10 +1112,17 @@ static void twab_clearFollowingAds(id self) {
 // at 0.5s / 1.5s / 3s and re-apply if something else moved it — but stop for
 // good the moment the user taps a tab, so we never fight them.
 static BOOL twab_userPickedTab = NO;
+// Declutter → Hide "+" (Create): position the Create tab had before we removed
+// it (-1 = not removed). Saved launch-tab positions are the original ones.
+static NSInteger twab_removedTabIndex = -1;
 
 static void twab_applyLaunchTab(UITabBarController *tbc, NSString *when) {
     if (twab_userPickedTab || ![tweakDefaults objectForKey:TWABKeyLaunchTab]) return;
     NSInteger idx = [tweakDefaults integerForKey:TWABKeyLaunchTab];
+    if (twab_removedTabIndex >= 0) {
+        if (idx == twab_removedTabIndex) return;  // the removed Create tab
+        if (idx > twab_removedTabIndex) idx--;    // tabs after it shifted left
+    }
     NSUInteger count = tbc.viewControllers.count;
     if (idx < 0 || idx >= (NSInteger)count) {
         os_log(OS_LOG_DEFAULT, "[TWAB-Launch] tab %ld out of range (%lu tabs) at %{public}@",
@@ -650,6 +1158,30 @@ static void twab_applyLaunchTab(UITabBarController *tbc, NSString *when) {
             });
         }
     });
+}
+// Declutter: drop the "+" (Create) tab — the view controller whose tab item is
+// Twitch's CreateTabBarItem — whenever Twitch sets the tabs.
+- (void)setViewControllers:(NSArray<UIViewController *> *)vcs animated:(BOOL)animated {
+    if ([tweakDefaults boolForKey:TWABKeyHideCreateTab] && vcs.count) {
+        Class createCls = objc_getClass("_TtC6Twitch16CreateTabBarItem");
+        NSUInteger i = createCls ? [vcs indexOfObjectPassingTest:^BOOL(UIViewController *vc, NSUInteger n, BOOL *stop) {
+            return [vc.tabBarItem isKindOfClass:createCls];
+        }] : NSNotFound;
+        if (i != NSNotFound) {
+            twab_removedTabIndex = (NSInteger)i;
+            NSMutableArray *kept = [vcs mutableCopy];
+            [kept removeObjectAtIndex:i];
+            os_log(OS_LOG_DEFAULT, "[TWAB-Declutter] removed Create tab (position %lu of %lu)",
+                   (unsigned long)i, (unsigned long)vcs.count);
+            vcs = kept;
+        } else {
+            NSMutableArray *items = [NSMutableArray array];
+            for (UIViewController *vc in vcs) [items addObject:NSStringFromClass(vc.tabBarItem.class)];
+            os_log(OS_LOG_DEFAULT, "[TWAB-Declutter] Create tab not found; tab items: %{public}@",
+                   [items componentsJoinedByString:@", "]);
+        }
+    }
+    %orig(vcs, animated);
 }
 // A real tab tap — from here on the user is in charge.
 - (void)tabBar:(UITabBar *)tabBar didSelectItem:(UITabBarItem *)item {
@@ -947,15 +1479,55 @@ static NSString *twab_viewText(UIView *v) {
   return nil;
 }
 
+// Button-like text only: a short label such as "Go Ad-Free". React Native
+// containers often expose all of their children's text as one combined
+// accessibilityLabel, so a long label that merely *contains* "Ad-Free" is a
+// whole card (e.g. the profile page's Stream Manager / Analytics block) and
+// must not match.
 static BOOL twab_isAdFreeText(NSString *txt) {
+  if (txt.length == 0 || txt.length > 32) return NO;
   return twab_strContains(txt, @"Ad-Free") || twab_strContains(txt, @"Ad Free");
+}
+
+// Only button-sized views are candidates — never cards or sections.
+static BOOL twab_isButtonSized(UIView *v) {
+  CGSize s = v.bounds.size;
+  return s.height <= 80 && s.width <= 400;
 }
 
 // Hide + zero-size the matched control, once per instance (associated-object
 // guard so we don't re-add constraints every layout, which would loop).
 static void twab_killAdFreeButton(UIView *v) {
-  if (!v) return;
+  if (!v || !v.superview) return;
   static char doneKey;
+  // Inside a stack view (profile page, ProfileInfoView): marking it hidden made
+  // the whole stack collapse and pinning its height clipped Stream Manager /
+  // Analytics, so it's taken out of the stack's arrangement. It stays a subview: Twitch
+  // re-activates constraints on it when the theme refreshes, and fully removing it
+  // crashed on tab switches ("no common ancestor", confirmed by a crash log).
+  // Checked before doneKey so that if Twitch re-adds it, it goes again. Deferred:
+  // this runs during layout, where changing the hierarchy isn't safe.
+  if ([v.superview isKindOfClass:UIStackView.class] && !twab_viewInPurchaseScreen(v)) {
+    v.alpha = 0;
+    if (![((UIStackView *)v.superview).arrangedSubviews containsObject:v]) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      UIStackView *stack = (UIStackView *)v.superview;
+      if (![stack isKindOfClass:UIStackView.class]) return;
+      os_log(OS_LOG_DEFAULT, "[TWAB-AdFree] removed button from %{public}@ %{public}@ in %{public}@",
+             NSStringFromClass(stack.class), NSStringFromCGRect(stack.frame),
+             NSStringFromClass(stack.superview.class));
+      [stack removeArrangedSubview:v];
+      v.hidden = YES;
+      // Without this the header above keeps its old height and clips the
+      // Stream Manager / Analytics row (confirmed on-device).
+      NSUInteger depth = 0;
+      for (UIView *a = stack; a && depth < 8; a = a.superview, depth++) {
+        [a invalidateIntrinsicContentSize];
+        [a setNeedsLayout];
+      }
+    });
+    return;
+  }
   if (objc_getAssociatedObject(v, &doneKey)) return;
   if (twab_viewInPurchaseScreen(v)) return;
   objc_setAssociatedObject(v, &doneKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -967,12 +1539,14 @@ static void twab_killAdFreeButton(UIView *v) {
   w.active = h.active = YES;
 }
 
-// Backup window scan: hide any Upsell/AdFree-classed or "Ad-Free"-titled view.
+// Backup window scan: hide button-sized Upsell/AdFree-classed or
+// "Ad-Free"-titled views. (Unrestricted, this used to hide whole containers —
+// e.g. the profile page's Stream Manager / Analytics card.)
 static void twab_scanForAdFree(UIView *root) {
   if (!root) return;
   NSString *cls = NSStringFromClass([root class]);
   if ((twab_strContains(cls, @"Upsell") || twab_strContains(cls, @"AdFree") ||
-       twab_isAdFreeText(twab_viewText(root))) && !root.hidden) {
+       twab_isAdFreeText(twab_viewText(root))) && !root.hidden && twab_isButtonSized(root)) {
     twab_killAdFreeButton(root);
     return;  // handled; don't descend
   }
@@ -1053,6 +1627,14 @@ static void twab_checkClass(const char *name) {
 
 
 %ctor {
+  // Ping proxies early so the first stream usually has a verdict to use.
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled] || ![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled]) return;
+    for (NSString *address in twab_effectiveProxyAddresses()) {
+      NSURL *proxyURL = twab_normalizedProxyURL(address);
+      if (proxyURL) twab_proxyPingVerdict(proxyURL);
+    }
+  });
   rebind_symbols(
       (struct rebinding[]){
           {"swift_unknownObjectWeakAssign", (void *)hook_swift_unknownObjectWeakAssign,
@@ -1077,6 +1659,8 @@ static void twab_checkClass(const char *name) {
     [tweakDefaults setBool:YES forKey:TWABKeyDisableWatchLimit];
   if (![tweakDefaults objectForKey:TWABKeyHideAdFreeButton])
     [tweakDefaults setBool:YES forKey:TWABKeyHideAdFreeButton];
+  if (![tweakDefaults objectForKey:TWABKeyFitWideEmotes])
+    [tweakDefaults setBool:YES forKey:TWABKeyFitWideEmotes];
   // Emote default lives here (not in Emotes.x's %ctor) because Logos
   // doesn't guarantee inter-file %ctor ordering — Emotes.x's %ctor
   // could run before Tweak.x's, when `tweakDefaults` is still nil, and

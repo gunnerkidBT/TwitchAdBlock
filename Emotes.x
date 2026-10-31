@@ -28,6 +28,7 @@
 //   • Sending works by typing the emote's name (it's plain chat text). The
 //     picker button in EmotePicker.x inserts names for you.
 
+#import "TWABProxyAuthDelegate.h"
 #import <Foundation/Foundation.h>
 #import <os/log.h>
 #import <objc/runtime.h>
@@ -529,14 +530,13 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
             _host, request.URL.path ?: @"?");
     }
 
-    // Emote URL capture — log every distinct emoticons/v2/ URL the chat
-    // requests (deduped so each unique URL prints once). Used to compare
-    // the URL format Twitch uses for native animated emotes (likely has
-    // "/animated/" in the path) vs static emotes (likely "/static/"). If
-    // Twitch's renderer keys animation off the URL path, we can route
-    // our synthetic IDs through the same scheme.
+    // Emote URL capture — log each distinct emoticons/v2/ URL for OUR
+    // synthetic 3rd-party emote IDs (≥ 9,000,000,000), deduped. Twitch's
+    // own emote URLs used to be logged too, which flooded the log.
     NSString *_path = request.URL.path;
-    if (_path && [_path containsString:@"emoticons/v2/"]) {
+    NSArray<NSString *> *_parts = request.URL.pathComponents;
+    if (_path && [_path containsString:@"emoticons/v2/"] && _parts.count > 3 &&
+        _parts[3].longLongValue >= 9000000000LL) {
         static NSMutableSet<NSString *> *seenEmoteURLs;
         static dispatch_once_t once;
         dispatch_once(&once, ^{ seenEmoteURLs = [NSMutableSet set]; });
@@ -632,7 +632,21 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
                         if (twab_normalizedProxyURL(a)) { connectAddr = a; break; }
                     }
                     if (connectAddr) {
-                        NSURLSession *proxySession = [(NSURLSession *)self twab_proxySessionWithAddress:connectAddr];
+                        // One proxy session per real session, instead of a new one per request.
+                        static char sharedProxySessionKey, sharedProxyAddressKey;
+                        NSURLSession *proxySession = nil;
+                        @synchronized (self) {
+                            NSString *sessionAddress = objc_getAssociatedObject(self, &sharedProxyAddressKey);
+                            proxySession = [sessionAddress isEqualToString:connectAddr]
+                                ? objc_getAssociatedObject(self, &sharedProxySessionKey) : nil;
+                            if (!proxySession) {
+                                proxySession = [(NSURLSession *)self twab_proxySessionWithAddress:connectAddr];
+                                objc_setAssociatedObject(self, &sharedProxySessionKey, proxySession,
+                                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                                objc_setAssociatedObject(self, &sharedProxyAddressKey, connectAddr,
+                                                         OBJC_ASSOCIATION_COPY_NONATOMIC);
+                            }
+                        }
                         if (proxySession) {
                             _td[@"twab_inProxyDispatch"] = @YES;
                             NSURLSessionDataTask *task = [proxySession dataTaskWithRequest:request];
@@ -644,6 +658,9 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
                                 os_log(OS_LOG_DEFAULT,
                                     "[TWAB-URL] routed master playlist via HTTP CONNECT proxy host=%{public}@",
                                     request.URL.host);
+                                // Only IVS tracks tasks by number; other delegates keep the real task.
+                                if ([NSStringFromClass([((NSURLSession *)self).delegate class]) isEqualToString:@"IVSPlayerURLSessionDelegate"])
+                                    return twab_playerTaskForProxiedTask(task);
                                 return task;
                             }
                         }

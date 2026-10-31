@@ -23,6 +23,51 @@ NSString *twab_basicAuthHeader(NSURL *url) {
   return [NSString stringWithFormat:@"Basic %@", [data base64EncodedStringWithOptions:0]];
 }
 
+static NSString *twab_pingCacheKey(NSURL *proxyURL) {
+  // Keyed on scheme://host:port: credentials and path don't affect whether the
+  // proxy speaks Luminous V1.
+  return [NSString stringWithFormat:@"%@://%@:%@", proxyURL.scheme ?: @"http",
+                                    proxyURL.host ?: @"?", proxyURL.port ?: @80];
+}
+
+NSNumber *twab_proxyPingVerdict(NSURL *proxyURL) {
+  static NSMutableSet<NSString *> *pending;
+  dispatch_once(&twab_pingLockOnce, ^{
+    twab_pingLock = dispatch_semaphore_create(1);
+    twab_pingCache = [NSMutableDictionary dictionary];
+    pending = [NSMutableSet set];
+  });
+  NSString *cacheKey = twab_pingCacheKey(proxyURL);
+  dispatch_semaphore_wait(twab_pingLock, DISPATCH_TIME_FOREVER);
+  NSNumber *cached = twab_pingCache[cacheKey];
+  BOOL shouldPing = !cached && ![pending containsObject:cacheKey];
+  if (shouldPing) [pending addObject:cacheKey];
+  dispatch_semaphore_signal(twab_pingLock);
+  if (!shouldPing) return cached;
+
+  NSMutableURLRequest *pingReq = [NSMutableURLRequest requestWithURL:[proxyURL URLByAppendingPathComponent:@"ping"]];
+  pingReq.timeoutInterval = 3.0;
+  NSString *auth = twab_basicAuthHeader(proxyURL);
+  if (auth) [pingReq setValue:auth forHTTPHeaderField:@"Authorization"];
+  NSDate *start = [NSDate date];
+  [[NSURLSession.sharedSession
+      dataTaskWithRequest:pingReq
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+          NSInteger statusCode = [response isKindOfClass:NSHTTPURLResponse.class]
+              ? ((NSHTTPURLResponse *)response).statusCode : -1;
+          BOOL isLuminous = statusCode == 200;
+          os_log(OS_LOG_DEFAULT,
+              "[TWAB-Proxy] ping %{public}@ status=%ld err=%{public}@ luminous=%d in %.2fs",
+              cacheKey, (long)statusCode, error.localizedDescription ?: @"(none)", isLuminous,
+              -[start timeIntervalSinceNow]);
+          dispatch_semaphore_wait(twab_pingLock, DISPATCH_TIME_FOREVER);
+          twab_pingCache[cacheKey] = @(isLuminous);
+          [pending removeObject:cacheKey];
+          dispatch_semaphore_signal(twab_pingLock);
+        }] resume];
+  return nil;
+}
+
 @implementation NSURL (TwitchAdBlock)
 - (NSURL *)twab_URLWithProxyURL:(NSURL *)proxyURL {
   // Keep log args short — usher URLs carry massive query strings that
@@ -39,59 +84,11 @@ NSString *twab_basicAuthHeader(NSURL *url) {
   BOOL isVOD = [comps[1] isEqualToString:@"vod"];
   NSString *playlistItem = [self.lastPathComponent stringByDeletingPathExtension];
 
-  dispatch_once(&twab_pingLockOnce, ^{
-    twab_pingLock = dispatch_semaphore_create(1);
-    twab_pingCache = [NSMutableDictionary dictionary];
-  });
-
-  // Key the cache on scheme://host:port — credentials and path don't affect
-  // whether the proxy speaks Luminous V1.
-  NSString *cacheKey = [NSString stringWithFormat:@"%@://%@:%@",
-                        proxyURL.scheme ?: @"http",
-                        proxyURL.host ?: @"?",
-                        proxyURL.port ?: @80];
-
-  dispatch_semaphore_wait(twab_pingLock, DISPATCH_TIME_FOREVER);
-  NSNumber *cached = twab_pingCache[cacheKey];
-  dispatch_semaphore_signal(twab_pingLock);
-  BOOL haveVerdict = (cached != nil);
-  BOOL cachedIsLuminous = cached.boolValue;
-
-  BOOL isLuminousV1;
-  if (haveVerdict) {
-    isLuminousV1 = cachedIsLuminous;
-  } else {
-    __block NSInteger statusCode = -1;
-    __block NSString *errDesc = nil;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    NSURL *pingURL = [proxyURL URLByAppendingPathComponent:@"ping"];
-    NSMutableURLRequest *pingReq = [NSMutableURLRequest requestWithURL:pingURL];
-    pingReq.timeoutInterval = 3.0;
-    NSString *auth = twab_basicAuthHeader(proxyURL);
-    if (auth) [pingReq setValue:auth forHTTPHeaderField:@"Authorization"];
-    NSDate *start = [NSDate date];
-    [[NSURLSession.sharedSession
-        dataTaskWithRequest:pingReq
-          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            if ([response isKindOfClass:NSHTTPURLResponse.class])
-              statusCode = ((NSHTTPURLResponse *)response).statusCode;
-            errDesc = error.localizedDescription;
-            dispatch_semaphore_signal(sem);
-          }] resume];
-    // 3.5s wait — slightly longer than the request timeout so a timed-out
-    // request gets logged with its error description instead of the
-    // semaphore expiring first.
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 3500 * NSEC_PER_MSEC));
-    NSTimeInterval elapsed = -[start timeIntervalSinceNow];
-    isLuminousV1 = (statusCode == 200);
-    os_log(OS_LOG_DEFAULT,
-        "[TWAB-Proxy] ping %{public}@ status=%ld err=%{public}@ luminous=%d in %.2fs",
-        cacheKey, (long)statusCode, errDesc ?: @"(none)", isLuminousV1, elapsed);
-
-    dispatch_semaphore_wait(twab_pingLock, DISPATCH_TIME_FOREVER);
-    twab_pingCache[cacheKey] = @(isLuminousV1);
-    dispatch_semaphore_signal(twab_pingLock);
-  }
+  // Never wait for the ping here. Blocking the player's thread on the first request
+  // of a launch left that stream stuck loading (confirmed by turning the proxy off).
+  // Until there's a verdict the request takes the CONNECT path.
+  NSNumber *verdict = twab_proxyPingVerdict(proxyURL);
+  BOOL isLuminousV1 = verdict.boolValue;
 
   if (isLuminousV1) {
     NSString *playlistType = isVOD ? @"vod" : @"playlist";

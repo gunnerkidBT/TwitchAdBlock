@@ -18,6 +18,13 @@ NSString *const TWABKeyHidePickerButton          = @"TWHidePickerButton";
 NSString *const TWABKeyKeepDeletedMessages       = @"TWKeepDeletedMessages";
 NSString *const TWABKeyHighlightDeletedNotes     = @"TWHighlightDeletedNotes";
 NSString *const TWABKeyHideRecapsBar             = @"TWHideRecapsBar";
+NSString *const TWABKeyFitWideEmotes             = @"TWFitWideEmotes";
+NSString *const TWABKeyHideCreateTab             = @"TWHideCreateTab";
+NSString *const TWABKeyHideLeaderboard           = @"TWHideLeaderboard";
+NSString *const TWABKeyHideSubscribe             = @"TWHideSubscribe";
+NSString *const TWABKeyHideBits                  = @"TWHideBits";
+NSString *const TWABKeyHideChannelBar            = @"TWHideChannelBar";
+NSString *const TWABKeyHideExtensions            = @"TWHideExtensions";
 
 NSString *twab_effectiveProxyAddress(void) {
     return [tweakDefaults boolForKey:TWABKeyAdBlockCustomProxyEnabled]

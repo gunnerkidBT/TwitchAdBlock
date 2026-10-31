@@ -47,6 +47,23 @@ extern NSString *const TWABKeyHighlightDeletedNotes;
 // BOOL - when YES, the Live page's "From channels you follow" bar of clips /
 // recaps (GraphQL op AnnouncementsRecapsBar) is emptied so it isn't shown.
 extern NSString *const TWABKeyHideRecapsBar;
+// BOOL - when YES (default), wide / tall 3rd-party emotes are padded to a
+// square so Twitch's square emote box shows them at their real proportions
+// instead of squished. NO = Twitch's stretched look.
+extern NSString *const TWABKeyFitWideEmotes;
+// BOOL - Declutter: remove the "+" (Create) tab from the bottom tab bar.
+extern NSString *const TWABKeyHideCreateTab;
+// BOOL - Declutter: remove the gifter/cheer leaderboard strip under the player.
+extern NSString *const TWABKeyHideLeaderboard;
+// BOOL - Declutter: remove the Subscribe and Gift a Sub buttons on the stream screen.
+extern NSString *const TWABKeyHideSubscribe;
+// BOOL - Declutter: remove the Bits (cheer) button from the chat box.
+extern NSString *const TWABKeyHideBits;
+// BOOL - Declutter: remove the bar under the player and let chat use its space.
+// Its buttons come back while the channel info panel is open.
+extern NSString *const TWABKeyHideChannelBar;
+// BOOL - Declutter: remove the extensions button (e.g. viewer maps) on the stream screen.
+extern NSString *const TWABKeyHideExtensions;
 
 // Resolves which proxy address to use right now: the user's custom value
 // when the custom-proxy toggle is on, otherwise the bundled default.

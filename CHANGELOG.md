@@ -5,6 +5,45 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.16 — October 31, 2026
+
+**Wide emotes aren't squished anymore.** Twitch fits every chat emote into the
+same square box, so wide 7TV, BetterTTV and FrankerFaceZ emotes used to get
+squeezed. Now they keep their real shape. They're a bit smaller, but not
+distorted, and animated ones still move. Prefer the old look? Turn off
+**Keep Wide Emote Shape** in Settings → Emotes. It's on by default.
+
+**New Declutter section in Settings.** All the "hide" options now live in one
+place: **Go Ad-Free**, **Twitch Stories**, **From Channels You Follow**, the
+**7TV Bar**, and a new one, the **"+" (Create) button** in the bottom tab bar.
+Your existing choices carry over.
+
+**Clear up the stream screen.** More options in Declutter: **Hide
+Leaderboard** removes the top gifters and cheerers strip under the video, **Hide
+Subscribe Buttons** removes Subscribe and Gift a Sub, and **Hide Bits Button**
+removes the cheering button from the chat box. **Hide Extensions Button** removes
+the button for extensions like viewer maps. **Hide Channel Bar** removes the bar
+under the video and gives that space to chat. Tap the video to see the channel
+info and buttons again. All are off by default.
+
+**Fixed:** with **Hide "Go Ad-Free" Button** on, Twitch could crash when switching
+tabs, such as coming back to your profile page.
+
+**Fixed:** with an ad-block proxy on, the first channel on the Live page could get
+stuck loading and never play.
+
+**Fixed:** with **Hide "From Channels You Follow"** on, the Live page only showed
+the first channel until you started scrolling.
+
+**Fixed:** with **Hide "Go Ad-Free" Button** on, Stream Manager and Analytics
+disappeared from your profile page. Now only the button goes, with no gap left
+behind.
+
+**Fixed:** 3rd-party emotes showing up late or not at all in fast chats after
+wide emotes were reshaped.
+
+---
+
 ## v0.1.15 — October 24, 2026
 
 **See what moderators delete.** Turn on **Keep Deleted Messages** in

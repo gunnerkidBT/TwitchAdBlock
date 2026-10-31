@@ -257,46 +257,19 @@ static void twab_denyStoryAccess(NSMutableDictionary *data, NSString *opName, BO
     }
 }
 
-// Hide "From channels you follow": the Live page's bar of clips / recaps is the
-// AnnouncementsRecapsBar operation (AnnouncementRecapBar → items of
-// AnnouncementRecapBarItem). Empty every list in it that holds bar items, so
-// the bar has nothing to show. Matched by operation name only.
-static void twab_emptyRecapBarItems(id obj, BOOL *dirty, NSUInteger depth) {
-    if (depth > 20) return;
-    if ([obj isKindOfClass:NSMutableDictionary.class]) {
-        NSMutableDictionary *d = obj;
-        for (NSString *key in [d allKeys]) {
-            id v = d[key];
-            if ([v isKindOfClass:NSArray.class] && [(NSArray *)v count]) {
-                id first = [(NSArray *)v firstObject];
-                NSString *t = [first isKindOfClass:NSDictionary.class] ? first[@"__typename"] : nil;
-                if ([t isKindOfClass:NSString.class] && [t containsString:@"RecapBarItem"]) {
-                    os_log(OS_LOG_DEFAULT, "[TWAB-Shelf] emptied %lu %{public}@ (From channels you follow)",
-                           (unsigned long)[(NSArray *)v count], t);
-                    d[key] = [NSMutableArray array];
-                    *dirty = YES;
-                    continue;
-                }
-            }
-            twab_emptyRecapBarItems(v, dirty, depth + 1);
-        }
-    } else if ([obj isKindOfClass:NSArray.class]) {
-        for (id v in (NSArray *)obj) twab_emptyRecapBarItems(v, dirty, depth + 1);
-    }
-}
-
-// Hide "Go Ad-Free", data side (31.x): the Following tab is React Native, so
-// the native button hooks in Tweak.x can't see its "Go Ad-Free" button. The
-// button is fed by the TurboUpsellButton operation (Turbo offer / pricing /
-// subscription product); nulling its top-level fields leaves the button
-// nothing to render.
-static void twab_nullTurboUpsell(NSMutableDictionary *data, BOOL *dirty) {
-    for (NSString *key in [data allKeys]) {
-        if (data[key] == (id)kCFNull) continue;
-        data[key] = (id)kCFNull;
-        *dirty = YES;
-    }
-    if (*dirty) os_log(OS_LOG_DEFAULT, "[TWAB-AdFree] nulled TurboUpsellButton response (Go Ad-Free button)");
+// Hide "Go Ad-Free", data side (31.x): React Native screens draw the button
+// from the TurboUpsellButton operation. Only its `offers` list is emptied.
+// Nulling subscriptionProduct itself overwrote a shared record (it also holds
+// the viewer's own benefit) and removed the profile page's Stream Manager /
+// Analytics section, so the product stays intact.
+static void twab_emptyTurboOffers(NSMutableDictionary *data, BOOL *dirty) {
+    NSMutableDictionary *product = data[@"subscriptionProduct"];
+    if (![product isKindOfClass:NSMutableDictionary.class]) return;
+    NSArray *offers = product[@"offers"];
+    if (![offers isKindOfClass:NSArray.class] || !offers.count) return;
+    product[@"offers"] = [NSMutableArray array];
+    *dirty = YES;
+    os_log(OS_LOG_DEFAULT, "[TWAB-AdFree] emptied %lu Turbo offer(s) (Go Ad-Free button)", (unsigned long)offers.count);
 }
 
 // Operation name for a response element: Twitch echoes it in
@@ -363,7 +336,6 @@ static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
                                              options:NSJSONReadingMutableContainers
                                                error:&error];
     if (!json || error) return self;
-
     // Handle both single operation (dict) and Apollo-batched operations (array)
     if ([json isKindOfClass:NSMutableDictionary.class]) {
         twab_applyPlatformSpoof(json);
@@ -379,7 +351,51 @@ static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
     return (out && !error) ? out : self;
 }
 
+// Hide Leaderboard: answer ChannelLeaderboards as if the streamer had turned all
+// leaderboards off, so Twitch drops the strip itself and leaves no gap.
+- (NSData *)twab_dataHidingLeaderboardsForRequest:(NSURLRequest *)request {
+    id json = [NSJSONSerialization JSONObjectWithData:self options:NSJSONReadingMutableContainers error:nil];
+    if (!json) return self;
+    BOOL dirty = NO;
+    NSArray *ops = [json isKindOfClass:NSMutableArray.class] ? json : @[json];
+    for (NSUInteger i = 0; i < ops.count; i++) {
+        NSMutableDictionary *op = ops[i];
+        if (![op isKindOfClass:NSMutableDictionary.class]) continue;
+        if (![twab_responseOperationName(op, request, i) isEqualToString:@"ChannelLeaderboards"]) continue;
+        NSDictionary *data = op[@"data"];
+        NSDictionary *user = [data isKindOfClass:NSDictionary.class] ? data[@"user"] : nil;
+        if (![user isKindOfClass:NSDictionary.class]) continue;
+        NSDictionary *userSettings = user[@"settings"];
+        NSMutableDictionary *board = [userSettings isKindOfClass:NSDictionary.class] ? userSettings[@"leaderboard"] : nil;
+        if ([board isKindOfClass:NSMutableDictionary.class]) {
+            for (NSString *key in @[@"isCheerEnabled", @"isSubGiftEnabled", @"isClipEnabled"]) board[key] = @NO;
+            dirty = YES;
+        }
+        NSDictionary *channel = user[@"channel"];
+        NSDictionary *set = [channel isKindOfClass:NSDictionary.class] ? channel[@"leaderboardSet"] : nil;
+        if (![set isKindOfClass:NSDictionary.class]) continue;
+        for (NSString *kind in @[@"bits", @"subGift", @"clip"]) {
+            NSMutableDictionary *entry = set[kind];
+            if (![entry isKindOfClass:NSMutableDictionary.class]) continue;
+            NSMutableDictionary *items = entry[@"items"];
+            if ([items isKindOfClass:NSMutableDictionary.class]) items[@"edges"] = [NSMutableArray array];
+            entry[@"myPosition"] = [NSNull null];
+            dirty = YES;
+        }
+    }
+    if (!dirty) return self;
+    os_log(OS_LOG_DEFAULT, "[TWAB-Hide] leaderboard response edited (%lu bytes)", (unsigned long)self.length);
+    NSData *out = [NSJSONSerialization dataWithJSONObject:json options:0 error:nil];
+    return out ?: self;
+}
+
 - (NSData *)twab_responseDataForRequest:(NSURLRequest *)request {
+    return [self twab_responseDataForRequest:request hideTurboOffers:NO];
+}
+
+// hideTurboOffers: only for React Native's copy of the response; native buttons
+// are hidden by the StandardButton hook.
+- (NSData *)twab_responseDataForRequest:(NSURLRequest *)request hideTurboOffers:(BOOL)hideTurboOffers {
     if (!request) return self;
     if (![request.URL.host isEqualToString:@"gql.twitch.tv"] ||
         ![request.URL.path isEqualToString:@"/gql"])
@@ -404,9 +420,8 @@ static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
     BOOL adBlock = [tweakDefaults boolForKey:TWABKeyAdBlockEnabled];
     BOOL stripWatchLimit = adBlock && [tweakDefaults boolForKey:TWABKeyDisableWatchLimit];
     BOOL hideStories = [tweakDefaults boolForKey:TWABKeyHideStories];
-    BOOL hideRecapsBar = [tweakDefaults boolForKey:TWABKeyHideRecapsBar];
     BOOL hideAdFree = [tweakDefaults boolForKey:TWABKeyHideAdFreeButton];
-    if (!adBlock && !hideStories && !hideRecapsBar && !hideAdFree) return self;
+    if (!adBlock && !hideStories && !hideAdFree) return self;
     BOOL dirty = NO;
     NSArray *ops = [json isKindOfClass:NSMutableArray.class] ? json : @[json];
     for (NSUInteger i = 0; i < ops.count; i++) {
@@ -415,11 +430,9 @@ static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
         NSString *opName = twab_responseOperationName(op, request, i);
         if (adBlock) twab_processTree(op[@"data"], arraySet, fieldSet, op[@"operationName"], &dirty);
         if (stripWatchLimit) twab_neutralizeWatchLimits(op[@"data"], &dirty);
-        if (hideRecapsBar && [opName isEqualToString:@"AnnouncementsRecapsBar"])
-            twab_emptyRecapBarItems(op[@"data"], &dirty, 0);
-        if (hideAdFree && [opName isEqualToString:@"TurboUpsellButton"] &&
+        if (hideAdFree && hideTurboOffers && [opName isEqualToString:@"TurboUpsellButton"] &&
             [op[@"data"] isKindOfClass:NSMutableDictionary.class])
-            twab_nullTurboUpsell(op[@"data"], &dirty);
+            twab_emptyTurboOffers(op[@"data"], &dirty);
         if (hideStories) {
             if ([op[@"data"] isKindOfClass:NSMutableDictionary.class] && twab_isStoryShelfOperation(opName))
                 twab_emptyStoryShelf(op[@"data"], &dirty);

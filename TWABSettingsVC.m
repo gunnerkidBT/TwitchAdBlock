@@ -186,10 +186,11 @@ extern NSArray<NSString *> *twab_pickerDiagnostics(void);
 // Section layout:
 //   0: Ad Block toggle           (always shown)
 //   1: Proxy + custom proxy      (only when ad block is on)
-//   2: Emotes toggle + hide 7TV bar + keep deleted messages [+ highlight notes] + reload
-//   3: Home: launch / stories / "from channels you follow" bar / keep-live-feed
-//   4: Tools: export / import / diagnostics
-//   5: empty / version footer    (always shown — last section)
+//   2: Emotes toggle + keep wide emote shape + keep deleted messages [+ highlight notes] + reload
+//   3: Home: launch / keep-live-feed
+//   4: Declutter: go ad-free / stories / "from channels you follow" / 7TV bar / "+" (Create)
+//   5: Tools: export / import / diagnostics
+//   6: empty / version footer    (always shown — last section)
 
 // Launch Screen options. tabIndex < 0 means "use Twitch's default" (both
 // keys cleared). subTabIndex < 0 means "don't override sub-tab".
@@ -217,12 +218,12 @@ static const TWABLaunchOpt kLaunchOpts[] = {
 #define TWAB_LAUNCH_OPT_COUNT (sizeof(kLaunchOpts) / sizeof(kLaunchOpts[0]))
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return 6;
+    return 7;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
-        case 0: return 2;  // ad block toggle + hide "Go Ad-Free" button
+        case 0: return 1;  // ad block toggle
         case 1:
             if (!self.adblockEnabled) return 0;
             if (!self.proxyEnabled) return 1;
@@ -230,9 +231,10 @@ static const TWABLaunchOpt kLaunchOpts[] = {
             // + "Add proxy" row) + status
             return self.customProxyEnabled ? (3 + (NSInteger)self.proxies.count + 1) : 3;
         case 2: return [self emotesRowCount];  // see emotesRowCount
-        case 3: return 4;  // launch dropdown + hide-stories + hide-recaps-bar + watch-limit
-        case 4: return 3;  // Tools: export, import, diagnostics
-        case 5: return 0;  // version footer only
+        case 3: return 2;  // launch dropdown + watch-limit
+        case 4: return 10;  // Declutter: go ad-free, stories, recaps bar, 7TV bar, create tab, leaderboard, subscribe, bits, channel bar, extensions
+        case 5: return 3;  // Tools: export, import, diagnostics
+        case 6: return 0;  // version footer only
         default: return 0;
     }
 }
@@ -245,8 +247,9 @@ static const TWABLaunchOpt kLaunchOpts[] = {
         case 1: return self.adblockEnabled ? LOC(@"settings.section.proxy", @"Proxy") : nil;
         case 2: return LOC(@"settings.section.emotes", @"Emotes");
         case 3: return LOC(@"settings.section.home", @"Home & Playback");
-        case 4: return LOC(@"settings.section.tools", @"Tools");
-        default: return nil;  // section 5 = version footer only
+        case 4: return LOC(@"settings.section.declutter", @"Declutter");
+        case 5: return LOC(@"settings.section.tools", @"Tools");
+        default: return nil;  // section 6 = version footer only
     }
 }
 
@@ -285,20 +288,12 @@ static const TWABLaunchOpt kLaunchOpts[] = {
          cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     switch (indexPath.section) {
         case 0:
-            if (indexPath.row == 0)
                 return [self switchCellWithTitle:LOC(@"settings.adblock.title", @"Ad Block")
                                         subtitle:LOC(@"settings.adblock.desc",
                                                      @"Block video, display, and feed ads.")
                                              on:_adblockEnabled
                                          action:@selector(adblockSwitchChanged:)
                                      identifier:@"AdBlockSwitch"];
-            return [self switchCellWithTitle:LOC(@"settings.hideadfree.title",
-                                                 @"Hide “Go Ad-Free” Button")
-                                    subtitle:LOC(@"settings.hideadfree.desc",
-                                                 @"Remove the Turbo upsell banner on the Following tab.")
-                                         on:[tweakDefaults boolForKey:TWABKeyHideAdFreeButton]
-                                     action:@selector(hideAdFreeSwitchChanged:)
-                                 identifier:@"HideAdFreeSwitch"];
         case 1: {
             NSInteger row = indexPath.row;
             if (row == 0)
@@ -330,13 +325,13 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                          action:@selector(emotesSwitchChanged:)
                                      identifier:@"EmotesSwitch"];
             if (indexPath.row == 1)
-                return [self switchCellWithTitle:LOC(@"settings.hidepickerbutton.title",
-                                                     @"Hide 7TV Bar")
-                                        subtitle:LOC(@"settings.hidepickerbutton.desc",
-                                                     @"Remove the 7TV bar above the keyboard when you type in chat (a 7TV button in older chat). Press and hold Twitch's emote button to open the 7TV picker instead.")
-                                             on:[tweakDefaults boolForKey:TWABKeyHidePickerButton]
-                                         action:@selector(hidePickerButtonSwitchChanged:)
-                                     identifier:@"HidePickerButtonSwitch"];
+                return [self switchCellWithTitle:LOC(@"settings.fitwideemotes.title",
+                                                     @"Keep Wide Emote Shape")
+                                        subtitle:LOC(@"settings.fitwideemotes.desc",
+                                                     @"Show wide 7TV, BTTV & FFZ emotes at their real shape (smaller) instead of squished into a square.")
+                                             on:[tweakDefaults boolForKey:TWABKeyFitWideEmotes]
+                                         action:@selector(fitWideEmotesSwitchChanged:)
+                                     identifier:@"FitWideEmotesSwitch"];
             if (indexPath.row == 2)
                 return [self switchCellWithTitle:LOC(@"settings.keepdeleted.title",
                                                      @"Keep Deleted Messages")
@@ -359,6 +354,22 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                  destructive:NO disclosure:NO identifier:@"ReloadEmotesCell"];
         case 3:
             if (indexPath.row == 0) return [self launchScreenDropdownCell];
+            return [self switchCellWithTitle:LOC(@"settings.watchlimit.title",
+                                                 @"Keep Live Feed Playing")
+                                    subtitle:LOC(@"settings.watchlimit.desc",
+                                                 @"Stop the Live feed cutting a stream off with the Watch/Follow overlay.")
+                                         on:[tweakDefaults boolForKey:TWABKeyDisableWatchLimit]
+                                     action:@selector(disableWatchLimitSwitchChanged:)
+                                 identifier:@"DisableWatchLimitSwitch"];
+        case 4:
+            if (indexPath.row == 0)
+                return [self switchCellWithTitle:LOC(@"settings.hideadfree.title",
+                                                 @"Hide “Go Ad-Free” Button")
+                                    subtitle:LOC(@"settings.hideadfree.desc",
+                                                 @"Remove the Turbo upsell button from the Following tab and your profile.")
+                                         on:[tweakDefaults boolForKey:TWABKeyHideAdFreeButton]
+                                     action:@selector(hideAdFreeSwitchChanged:)
+                                 identifier:@"HideAdFreeSwitch"];
             if (indexPath.row == 1)
                 return [self switchCellWithTitle:LOC(@"settings.hidestories.title",
                                                      @"Hide Twitch Stories")
@@ -375,14 +386,62 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                              on:[tweakDefaults boolForKey:TWABKeyHideRecapsBar]
                                          action:@selector(hideRecapsBarSwitchChanged:)
                                      identifier:@"HideRecapsBarSwitch"];
-            return [self switchCellWithTitle:LOC(@"settings.watchlimit.title",
-                                                 @"Keep Live Feed Playing")
-                                    subtitle:LOC(@"settings.watchlimit.desc",
-                                                 @"Stop the Live feed cutting a stream off with the Watch/Follow overlay.")
-                                         on:[tweakDefaults boolForKey:TWABKeyDisableWatchLimit]
-                                     action:@selector(disableWatchLimitSwitchChanged:)
-                                 identifier:@"DisableWatchLimitSwitch"];
-        case 4:
+            if (indexPath.row == 3)
+                return [self switchCellWithTitle:LOC(@"settings.hidepickerbutton.title",
+                                                     @"Hide 7TV Bar")
+                                        subtitle:LOC(@"settings.hidepickerbutton.desc",
+                                                     @"Remove the 7TV bar above the keyboard when you type in chat (a 7TV button in older chat). Press and hold Twitch's emote button to open the 7TV picker instead.")
+                                             on:[tweakDefaults boolForKey:TWABKeyHidePickerButton]
+                                         action:@selector(hidePickerButtonSwitchChanged:)
+                                     identifier:@"HidePickerButtonSwitch"];
+            if (indexPath.row == 5)
+                return [self switchCellWithTitle:LOC(@"settings.hideleaderboard.title",
+                                                     @"Hide Leaderboard")
+                                        subtitle:LOC(@"settings.hideleaderboard.desc",
+                                                     @"Remove the top gifters and cheerers strip under the video. Applies the next time you open a stream.")
+                                             on:[tweakDefaults boolForKey:TWABKeyHideLeaderboard]
+                                         action:@selector(hideLeaderboardSwitchChanged:)
+                                     identifier:@"HideLeaderboardSwitch"];
+            if (indexPath.row == 6)
+                return [self switchCellWithTitle:LOC(@"settings.hidesubscribe.title",
+                                                     @"Hide Subscribe Buttons")
+                                        subtitle:LOC(@"settings.hidesubscribe.desc",
+                                                     @"Remove Subscribe and Gift a Sub under the video. Applies the next time you open a stream.")
+                                             on:[tweakDefaults boolForKey:TWABKeyHideSubscribe]
+                                         action:@selector(hideSubscribeSwitchChanged:)
+                                     identifier:@"HideSubscribeSwitch"];
+            if (indexPath.row == 7)
+                return [self switchCellWithTitle:LOC(@"settings.hidebits.title",
+                                                     @"Hide Bits Button")
+                                        subtitle:LOC(@"settings.hidebits.desc",
+                                                     @"Remove the cheering button from the chat box. Applies the next time you open a stream.")
+                                             on:[tweakDefaults boolForKey:TWABKeyHideBits]
+                                         action:@selector(hideBitsSwitchChanged:)
+                                     identifier:@"HideBitsSwitch"];
+            if (indexPath.row == 8)
+                return [self switchCellWithTitle:LOC(@"settings.hidechannelbar.title",
+                                                     @"Hide Channel Bar")
+                                        subtitle:LOC(@"settings.hidechannelbar.desc",
+                                                     @"Remove the bar under the video so chat gets the space. Tap the video to see the channel info and buttons. Applies the next time you open a stream.")
+                                             on:[tweakDefaults boolForKey:TWABKeyHideChannelBar]
+                                         action:@selector(hideChannelBarSwitchChanged:)
+                                     identifier:@"HideChannelBarSwitch"];
+            if (indexPath.row == 9)
+                return [self switchCellWithTitle:LOC(@"settings.hideextensions.title",
+                                                     @"Hide Extensions Button")
+                                        subtitle:LOC(@"settings.hideextensions.desc",
+                                                     @"Remove the button for channel extensions, like viewer maps. Applies the next time you open a stream.")
+                                             on:[tweakDefaults boolForKey:TWABKeyHideExtensions]
+                                         action:@selector(hideExtensionsSwitchChanged:)
+                                     identifier:@"HideExtensionsSwitch"];
+            return [self switchCellWithTitle:LOC(@"settings.hidecreatetab.title",
+                                                 @"Hide “+” (Create) Button")
+                                    subtitle:LOC(@"settings.hidecreatetab.desc",
+                                                 @"Remove the Create button from the middle of the bottom tab bar. Applies the next time Twitch opens.")
+                                         on:[tweakDefaults boolForKey:TWABKeyHideCreateTab]
+                                     action:@selector(hideCreateTabSwitchChanged:)
+                                 identifier:@"HideCreateTabSwitch"];
+        case 5:
             if (indexPath.row == 0)
                 return [self actionCellWithTitle:LOC(@"settings.tools.export", @"Export Settings")
                                         subtitle:LOC(@"settings.tools.export.desc",
@@ -459,7 +518,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
         [self presentLaunchScreenPicker:[tableView cellForRowAtIndexPath:indexPath]];
         return;
     }
-    if (indexPath.section == 4) {
+    if (indexPath.section == 5) {
         if (indexPath.row == 0)
             [self exportSettings:[tableView cellForRowAtIndexPath:indexPath]];
         else if (indexPath.row == 1)
@@ -807,7 +866,7 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 #pragma mark - UITableViewDelegate (footers)
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
-    if (section == 5) {
+    if (section == 6) {
         UILabel *ver = [[UILabel alloc] init];
         ver.text = @"TwitchMods v" PACKAGE_VERSION;
         ver.textAlignment = NSTextAlignmentCenter;
@@ -860,8 +919,8 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     // Collapse footers for sections that no longer have one (their
     // descriptions moved to per-row subtitles), otherwise grouped style
-    // leaves an empty gap. Section 4 = version, section 1 = proxy mechanics.
-    BOOL hasFooter = (section == 5) ||
+    // leaves an empty gap. Section 6 = version, section 1 = proxy mechanics.
+    BOOL hasFooter = (section == 6) ||
         (section == 1 && self.adblockEnabled && self.proxyEnabled && self.customProxyEnabled);
     return hasFooter ? UITableViewAutomaticDimension : CGFLOAT_MIN;
 }
@@ -899,9 +958,9 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     if (sw.on) [self refreshProxyStatus];
 }
 
-// Emotes section rows: 3rd-party emotes, hide 7TV bar, keep deleted messages,
-// [highlight notes — only while keep deleted messages is on], reload emotes
-// (always last).
+// Emotes section rows: 3rd-party emotes, keep wide emote shape,
+// keep deleted messages, [highlight notes — only while keep deleted messages
+// is on], reload emotes (always last).
 - (NSInteger)emotesRowCount {
     return [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 5 : 4;
 }
@@ -912,6 +971,34 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     NSIndexPath *sub = [NSIndexPath indexPathForRow:3 inSection:2];
     if (sw.on) [self.tableView insertRowsAtIndexPaths:@[sub] withRowAnimation:UITableViewRowAnimationFade];
     else       [self.tableView deleteRowsAtIndexPaths:@[sub] withRowAnimation:UITableViewRowAnimationFade];
+}
+
+- (void)hideCreateTabSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideCreateTab];
+}
+
+- (void)hideLeaderboardSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideLeaderboard];
+}
+
+- (void)hideSubscribeSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideSubscribe];
+}
+
+- (void)hideChannelBarSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideChannelBar];
+}
+
+- (void)hideExtensionsSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideExtensions];
+}
+
+- (void)hideBitsSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideBits];
+}
+
+- (void)fitWideEmotesSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyFitWideEmotes];
 }
 
 - (void)highlightDeletedSwitchChanged:(UISwitch *)sw {
@@ -950,7 +1037,9 @@ static NSArray<NSString *> *twab_exportKeys(void) {
               TWABKeyHideStories, TWABKeyDisableWatchLimit,
               TWABKeyHideAdFreeButton, TWABKeyHidePickerButton,
               TWABKeyKeepDeletedMessages, TWABKeyHighlightDeletedNotes,
-              TWABKeyHideRecapsBar ];
+              TWABKeyHideRecapsBar, TWABKeyFitWideEmotes, TWABKeyHideCreateTab,
+              TWABKeyHideLeaderboard, TWABKeyHideSubscribe, TWABKeyHideBits,
+              TWABKeyHideChannelBar, TWABKeyHideExtensions ];
 }
 
 - (void)reloadEmotesTapped:(UIView *)anchor {
