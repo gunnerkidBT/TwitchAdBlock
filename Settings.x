@@ -20,6 +20,74 @@ static NSIndexPath *twab_templateRow(NSIndexPath *ours) {
   return [NSIndexPath indexPathForRow:MAX(ours.row - 1, 0) inSection:ours.section];
 }
 
+// Our row borrows a cell that may have no chevron (My Schedule has none). One we add
+// is marked and removed in prepareForReuse, before Twitch sets the cell up for its
+// next row, so it can't carry over.
+static char twab_addedChevronKey;
+
+static void twab_addChevron(UITableViewCell *cell, UITableView *tableView) {
+  if (cell.accessoryType != UITableViewCellAccessoryNone || cell.accessoryView) return;
+  UIImageView *chevron = nil;
+  for (UITableViewCell *other in tableView.visibleCells) {
+    if (other == cell || ![other.accessoryView isKindOfClass:UIImageView.class]) continue;
+    UIImageView *theirs = (UIImageView *)other.accessoryView;
+    if (!theirs.image) continue;
+    chevron = [[UIImageView alloc] initWithImage:theirs.image];
+    chevron.tintColor = theirs.tintColor;
+    chevron.frame = theirs.bounds;
+    break;
+  }
+  if (!chevron) {
+    UIImageSymbolConfiguration *size =
+        [UIImageSymbolConfiguration configurationWithPointSize:16 weight:UIImageSymbolWeightMedium];
+    chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right" withConfiguration:size]];
+    chevron.tintColor = UIColor.secondaryLabelColor;
+    [chevron sizeToFit];
+  }
+  cell.accessoryView = chevron;
+  objc_setAssociatedObject(cell, &twab_addedChevronKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void twab_collectCellContent(UIView *view, NSMutableArray *images, NSMutableArray *labels) {
+  for (UIView *sub in view.subviews) {
+    if (sub.hidden) continue;
+    if ([sub isKindOfClass:UIImageView.class] && ((UIImageView *)sub).image) [images addObject:sub];
+    if ([sub isKindOfClass:UILabel.class] && ((UILabel *)sub).text.length) [labels addObject:sub];
+    twab_collectCellContent(sub, images, labels);
+  }
+}
+
+// Keep the borrowed row exactly as Twitch built it and swap what it shows: its
+// leftmost icon, its first label, and no subtitle. Twitch sets these again when it
+// reuses the cell. Returns NO if the row doesn't have both.
+static BOOL twab_restyleBorrowedCell(UITableViewCell *cell, UIImage *image, NSString *title) {
+  [cell layoutIfNeeded];
+  NSMutableArray<UIImageView *> *images = [NSMutableArray array];
+  NSMutableArray<UILabel *> *labels = [NSMutableArray array];
+  twab_collectCellContent(cell.contentView, images, labels);
+  UIImageView *icon = nil;
+  for (UIImageView *candidate in images) {
+    if (!icon || [candidate convertRect:candidate.bounds toView:cell].origin.x < [icon convertRect:icon.bounds toView:cell].origin.x)
+      icon = candidate;
+  }
+  if (!icon || !labels.count) return NO;
+  icon.image = image;
+  labels.firstObject.text = title;
+  for (NSUInteger i = 1; i < labels.count; i++) labels[i].text = nil;
+  return YES;
+}
+
+%hook _TtC6Twitch19SimpleTableViewCell
+- (void)prepareForReuse {
+  UITableViewCell *cell = (UITableViewCell *)self;
+  if (objc_getAssociatedObject(cell, &twab_addedChevronKey)) {
+    objc_setAssociatedObject(cell, &twab_addedChevronKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    cell.accessoryView = nil;
+  }
+  %orig;
+}
+%end
+
 %hook _TtC6Twitch25AccountMenuViewController
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
   if (twab_isOurRow((id)self, tableView, indexPath)) return %orig(tableView, twab_templateRow(indexPath));
@@ -130,7 +198,7 @@ static NSIndexPath *twab_templateRow(NSIndexPath *ours) {
   // Borrow a real Twitch-styled cell from the row above ours so we
   // inherit the private nested AccountMenuViewController.Cell class —
   // that gets us bold title, themed chevron, themed background, all
-  // automatically. Then we just retitle + add an icon. Falls back to a
+  // automatically. Then we just retitle + set its icon. Falls back to a
   // direct allocation if borrowing fails (e.g., we're the only row).
   //
   // Why not UIListContentConfiguration on a fresh cell instead: setting
@@ -150,40 +218,20 @@ static NSIndexPath *twab_templateRow(NSIndexPath *ours) {
                : [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"TWABMenuEntry"];
   }
 
-  // Title — prepended with U+2003 (em-spaces) so the label visibly
-  // starts past our leading-edge icon. Twitch's cell adds the title
-  // label at the leading edge (no icon slot) and exposes no way to
-  // shift it, so we cheat by indenting the string itself. Em-spaces
-  // scale with the font size so the relative gap is stable across
-  // dynamic-type adjustments. Tweak the em-space count if alignment
-  // is off — each "U+2003" = roughly one capital-letter width.
-  NSString *paddedTitle = @"  TwitchMods";
-  SEL configSel = NSSelectorFromString(@"configureWithTitle:");
-  if ([cell respondsToSelector:configSel]) {
-    ((void (*)(id, SEL, NSString *))objc_msgSend)(cell, configSel, paddedTitle);
-  } else {
-    cell.textLabel.text = paddedTitle;
+  // Only a cell that couldn't be restyled is configured from scratch, because
+  // configureWithTitle: clears the row's icon and shifts its text.
+  UIImage *wrench = [[UIImage systemImageNamed:@"wrench.and.screwdriver.fill"]
+      imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+  if (!twab_restyleBorrowedCell(cell, wrench, @"TwitchMods")) {
+    SEL configSel = NSSelectorFromString(@"configureWithTitle:");
+    if ([cell respondsToSelector:configSel]) {
+      ((void (*)(id, SEL, NSString *))objc_msgSend)(cell, configSel, @"TwitchMods");
+    } else {
+      cell.textLabel.text = @"TwitchMods";
+    }
+    cell.imageView.image = wrench;
   }
-
-  // Add (or reuse) our leading icon. Tagged so cell reuse doesn't
-  // double-add it on subsequent calls.
-  static const NSInteger kTWABIconTag = 0x7AB10C0;
-  UIImageView *icon = [cell.contentView viewWithTag:kTWABIconTag];
-  if (!icon) {
-    icon = [[UIImageView alloc] init];
-    icon.tag = kTWABIconTag;
-    icon.translatesAutoresizingMaskIntoConstraints = NO;
-    icon.contentMode = UIViewContentModeScaleAspectFit;
-    icon.tintColor = UIColor.labelColor;
-    [cell.contentView addSubview:icon];
-    [NSLayoutConstraint activateConstraints:@[
-      [icon.leadingAnchor constraintEqualToAnchor:cell.contentView.layoutMarginsGuide.leadingAnchor],
-      [icon.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-      [icon.widthAnchor constraintEqualToConstant:22],
-      [icon.heightAnchor constraintEqualToConstant:22],
-    ]];
-  }
-  icon.image = [UIImage systemImageNamed:@"wrench.and.screwdriver.fill"];
+  twab_addChevron(cell, tableView);
 
   return cell;
 }

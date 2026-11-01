@@ -642,11 +642,17 @@ static void twab_hookFeedPreload(void) {
     IMP orig = method_getImplementation(m);
     method_setImplementation(m, imp_implementationWithBlock(^(id self, twab_rnResolve resolve, twab_rnReject reject) {
       twab_rnResolve wrapped = resolve;
-      if (resolve && [tweakDefaults boolForKey:TWABKeyAdBlockEnabled] &&
-          [tweakDefaults boolForKey:TWABKeyDisableWatchLimit]) {
+      if (resolve && [tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) {
         wrapped = ^(id result) {
+          // This page skips the network hooks, so feed ads are removed here too. Left
+          // in, one stayed as a tall empty slot under the first channel.
+          id clean = twab_stripPreloadFeedAds(result, 0);
+          if (![tweakDefaults boolForKey:TWABKeyDisableWatchLimit]) {
+            resolve(clean);
+            return;
+          }
           NSUInteger before = twab_preloadLimitsNulled;
-          id out = twab_nullWatchLimits(result, 0);
+          id out = twab_nullWatchLimits(clean, 0);
           os_log(OS_LOG_DEFAULT, "[TWAB-Watch] feed preload resolved (%{public}@), limits nulled: %lu",
                  NSStringFromClass([result class]), (unsigned long)(twab_preloadLimitsNulled - before));
           resolve(out);

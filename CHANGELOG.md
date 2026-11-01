@@ -5,6 +5,18 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.17 — November 1, 2026
+
+**Fixed:** with ad-blocking on, the Live page could show a big empty gap under the
+first channel until you scrolled. It was a blocked ad leaving its space behind.
+v0.1.16 said this was fixed, but it wasn't.
+
+**Fixed:** the TwitchMods wrench icon could appear on top of other icons in
+Twitch's menus, like the Settings gear, and the TwitchMods name didn't line up
+with the rows around it. It also now always shows the arrow on the right.
+
+---
+
 ## v0.1.16 — October 31, 2026
 
 **Wide emotes aren't squished anymore.** Twitch fits every chat emote into the
@@ -31,9 +43,6 @@ tabs, such as coming back to your profile page.
 
 **Fixed:** with an ad-block proxy on, the first channel on the Live page could get
 stuck loading and never play.
-
-**Fixed:** with **Hide "From Channels You Follow"** on, the Live page only showed
-the first channel until you started scrolling.
 
 **Fixed:** with **Hide "Go Ad-Free" Button** on, Stream Manager and Analytics
 disappeared from your profile page. Now only the button goes, with no gap left

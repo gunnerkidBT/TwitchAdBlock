@@ -323,6 +323,40 @@ static void twab_applyPlatformSpoof(NSMutableDictionary *op) {
     }
 }
 
+id twab_stripPreloadFeedAds(id result, NSUInteger depth) {
+    if (!result || depth > 12) return result;
+    if ([result isKindOfClass:NSString.class]) {
+        NSString *text = result;
+        if (![text containsString:@"FeedAd"]) return result;
+        NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+        id json = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil];
+        if (!json) {
+            os_log(OS_LOG_DEFAULT, "[TWAB-Strip] preload text has FeedAd but isn't JSON (%lu chars)", (unsigned long)text.length);
+            return result;
+        }
+        id stripped = twab_stripPreloadFeedAds(json, depth + 1);
+        NSData *out = [NSJSONSerialization dataWithJSONObject:stripped options:0 error:nil];
+        NSString *outText = out ? [[NSString alloc] initWithData:out encoding:NSUTF8StringEncoding] : nil;
+        return outText ?: result;
+    }
+    if ([result isKindOfClass:NSDictionary.class] || [result isKindOfClass:NSArray.class]) {
+        NSData *copy = [NSJSONSerialization isValidJSONObject:result]
+            ? [NSJSONSerialization dataWithJSONObject:result options:0 error:nil] : nil;
+        id tree = copy ? [NSJSONSerialization JSONObjectWithData:copy options:NSJSONReadingMutableContainers error:nil] : nil;
+        if (!tree) return result;
+        BOOL dirty = NO;
+        twab_processTree(tree, twab_arrayAdTypenames(), [NSSet set], @"feedPreload", &dirty);
+        if ([tree isKindOfClass:NSMutableDictionary.class]) {
+            NSMutableDictionary *dict = tree;
+            for (NSString *key in dict.allKeys) {
+                if ([dict[key] isKindOfClass:NSString.class]) dict[key] = twab_stripPreloadFeedAds(dict[key], depth + 1);
+            }
+        }
+        return tree;
+    }
+    return result;
+}
+
 @implementation NSData (TwitchAdBlock)
 
 - (NSData *)twab_requestDataForRequest:(NSURLRequest *)request {
