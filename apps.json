@@ -22,6 +22,15 @@
       "versions": [
         {
           "version": "31.7",
+          "buildVersion": "262892206363475382",
+          "date": "2026-11-01T22:28:38Z",
+          "localizedDescription": "TwitchMods 0.1.17 for Twitch 31.7\n\n**Fixed:** with ad-blocking on, the Live page could show a big empty gap under the first channel until you scrolled. It was a blocked ad leaving its space behind. v0.1.16 said this was fixed, but it wasn't.\n\n**Fixed:** the TwitchMods wrench icon could appear on top of other icons in Twitch's menus, like the Settings gear, and the TwitchMods name didn't line up with the rows around it. It also now always shows the arrow on the right.",
+          "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.7-0.1.17/tv.twitch-31.7-TwitchAdBlock-0.1.17.ipa",
+          "size": 197828286,
+          "minOSVersion": "16.4"
+        },
+        {
+          "version": "31.7",
           "buildVersion": "262892206363475381",
           "date": "2026-10-31T16:13:45Z",
           "localizedDescription": "TwitchMods 0.1.16 for Twitch 31.7\n\n**Wide emotes aren't squished anymore.** Twitch fits every chat emote into the same square box, so wide 7TV, BetterTTV and FrankerFaceZ emotes used to get squeezed. Now they keep their real shape. They're a bit smaller, but not distorted, and animated ones still move. Prefer the old look? Turn off **Keep Wide Emote Shape** in Settings → Emotes. It's on by default.\n\n**New Declutter section in Settings.** All the \"hide\" options now live in one place: **Go Ad-Free**, **Twitch Stories**, **From Channels You Follow**, the **7TV Bar**, and a new one, the **\"+\" (Create) button** in the bottom tab bar. Your existing choices carry over.\n\n**Clear up the stream screen.** More options in Declutter: **Hide Leaderboard** removes the top gifters and cheerers strip under the video, **Hide Subscribe Buttons** removes Subscribe and Gift a Sub, and **Hide Bits Button** removes the cheering button from the chat box. **Hide Extensions Button** removes the button for extensions like viewer maps. **Hide Channel Bar** removes the bar under the video and gives that space to chat. Tap the video to see the channel info and buttons again. All are off by default.\n\n**Fixed:** with **Hide \"Go Ad-Free\" Button** on, Twitch could crash when switching tabs, such as coming back to your profile page.\n\n**Fixed:** with an ad-block proxy on, the first channel on the Live page could get stuck loading and never play.\n\n**Fixed:** with **Hide \"From Channels You Follow\"** on, the Live page only showed the first channel until you started scrolling.\n\n**Fixed:** with **Hide \"Go Ad-Free\" Button** on, Stream Manager and Analytics disappeared from your profile page. Now only the button goes, with no gap left behind.\n\n**Fixed:** 3rd-party emotes showing up late or not at all in fast chats after wide emotes were reshaped.",
@@ -100,10 +109,10 @@
         }
       },
       "version": "31.7",
-      "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.7-0.1.16/tv.twitch-31.7-TwitchAdBlock-0.1.16.ipa",
-      "size": 197825663,
-      "versionDate": "2026-10-31T16:13:45Z",
-      "versionDescription": "TwitchMods 0.1.16 for Twitch 31.7\n\n**Wide emotes aren't squished anymore.** Twitch fits every chat emote into the same square box, so wide 7TV, BetterTTV and FrankerFaceZ emotes used to get squeezed. Now they keep their real shape. They're a bit smaller, but not distorted, and animated ones still move. Prefer the old look? Turn off **Keep Wide Emote Shape** in Settings → Emotes. It's on by default.\n\n**New Declutter section in Settings.** All the \"hide\" options now live in one place: **Go Ad-Free**, **Twitch Stories**, **From Channels You Follow**, the **7TV Bar**, and a new one, the **\"+\" (Create) button** in the bottom tab bar. Your existing choices carry over.\n\n**Clear up the stream screen.** More options in Declutter: **Hide Leaderboard** removes the top gifters and cheerers strip under the video, **Hide Subscribe Buttons** removes Subscribe and Gift a Sub, and **Hide Bits Button** removes the cheering button from the chat box. **Hide Extensions Button** removes the button for extensions like viewer maps. **Hide Channel Bar** removes the bar under the video and gives that space to chat. Tap the video to see the channel info and buttons again. All are off by default.\n\n**Fixed:** with **Hide \"Go Ad-Free\" Button** on, Twitch could crash when switching tabs, such as coming back to your profile page.\n\n**Fixed:** with an ad-block proxy on, the first channel on the Live page could get stuck loading and never play.\n\n**Fixed:** with **Hide \"From Channels You Follow\"** on, the Live page only showed the first channel until you started scrolling.\n\n**Fixed:** with **Hide \"Go Ad-Free\" Button** on, Stream Manager and Analytics disappeared from your profile page. Now only the button goes, with no gap left behind.\n\n**Fixed:** 3rd-party emotes showing up late or not at all in fast chats after wide emotes were reshaped."
+      "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.7-0.1.17/tv.twitch-31.7-TwitchAdBlock-0.1.17.ipa",
+      "size": 197828286,
+      "versionDate": "2026-11-01T22:28:38Z",
+      "versionDescription": "TwitchMods 0.1.17 for Twitch 31.7\n\n**Fixed:** with ad-blocking on, the Live page could show a big empty gap under the first channel until you scrolled. It was a blocked ad leaving its space behind. v0.1.16 said this was fixed, but it wasn't.\n\n**Fixed:** the TwitchMods wrench icon could appear on top of other icons in Twitch's menus, like the Settings gear, and the TwitchMods name didn't line up with the rows around it. It also now always shows the arrow on the right."
     }
   ],
   "news": []
