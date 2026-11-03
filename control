@@ -1,10 +1,10 @@
 Package: com.level3tjg.twitchadblock
 Name: TwitchAdBlock
-Version: 1.0.0
+Version: 0.1.17
 Architecture: iphoneos-arm
-Description: Block Twitch video ads
-Depiction: https://level3tjg.me/repo/depictions/?p=com.level3tjg.twitchadblock
-Maintainer: level3tjg
-Author: level3tjg
+Description: Block Twitch video ads and add 7TV, BTTV and FFZ emotes. Built for Twitch 31.7; older versions are untested.
+Homepage: https://github.com/gunnerkidBT/TwitchAdBlock
+Maintainer: gunnerkidBT
+Author: gunnerkidBT, based on the original by level3tjg
 Section: Tweaks
 Depends: mobilesubstrate
