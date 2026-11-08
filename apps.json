@@ -21,6 +21,15 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "31.9",
+          "buildVersion": "263092206363475383",
+          "date": "2026-11-08T00:00:00Z",
+          "localizedDescription": "TwitchMods 0.1.18 for Twitch 31.9\n\n**Auto-claim bonus channel points.** When you watch a stream long enough, a bonus points chest appears in chat. Now the mod claims it for you automatically — no tapping needed. Turn it on in Settings → Chat → Auto-Claim Bonus Points. It's off by default.\n\n**Works with Twitch 31.9.** Verified that all features still work on the latest Twitch update.\n\n**Fixed:** setting your launch screen to \"Following\" made streams unclickable until you switched tabs and came back. It also showed the wrong theme (dark mode) until you moved away. Both are fixed.",
+          "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.9-0.1.18/tv.twitch-31.9-TwitchAdBlock-0.1.18.ipa",
+          "size": 199752793,
+          "minOSVersion": "16.4"
+        },
+        {
           "version": "31.7",
           "buildVersion": "262892206363475382",
           "date": "2026-11-01T22:28:38Z",
@@ -108,11 +117,11 @@
           "NSUserTrackingUsageDescription": "Your iOS advertising ID and device data will be used to support creators and provide a personal ad experience."
         }
       },
-      "version": "31.7",
-      "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.7-0.1.17/tv.twitch-31.7-TwitchAdBlock-0.1.17.ipa",
-      "size": 197828286,
-      "versionDate": "2026-11-01T22:28:38Z",
-      "versionDescription": "TwitchMods 0.1.17 for Twitch 31.7\n\n**Fixed:** with ad-blocking on, the Live page could show a big empty gap under the first channel until you scrolled. It was a blocked ad leaving its space behind. v0.1.16 said this was fixed, but it wasn't.\n\n**Fixed:** the TwitchMods wrench icon could appear on top of other icons in Twitch's menus, like the Settings gear, and the TwitchMods name didn't line up with the rows around it. It also now always shows the arrow on the right."
+      "version": "31.9",
+      "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.9-0.1.18/tv.twitch-31.9-TwitchAdBlock-0.1.18.ipa",
+      "size": 199752793,
+      "versionDate": "2026-11-08T00:00:00Z",
+      "versionDescription": "TwitchMods 0.1.18 for Twitch 31.9\n\n**Auto-claim bonus channel points.** When you watch a stream long enough, a bonus points chest appears in chat. Now the mod claims it for you automatically — no tapping needed. Turn it on in Settings → Chat → Auto-Claim Bonus Points. It's off by default.\n\n**Works with Twitch 31.9.** Verified that all features still work on the latest Twitch update.\n\n**Fixed:** setting your launch screen to \"Following\" made streams unclickable until you switched tabs and came back. It also showed the wrong theme (dark mode) until you moved away. Both are fixed."
     }
   ],
   "news": []
