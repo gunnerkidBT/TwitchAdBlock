@@ -6,6 +6,7 @@
 #import <ImageIO/ImageIO.h>
 #import "Tweak.h"
 #import "SettingsKeys.h"
+#import "ChannelPoints.h"
 
 NSBundle *tweakBundle;
 NSUserDefaults *tweakDefaults;
@@ -548,6 +549,7 @@ static BOOL twab_completeHeldEmote(id delegate, NSURLSession *session, NSURLSess
 }
 
 static NSData *twab_filteredFeedData(id delegate, NSData *data, NSURLSessionDataTask *dataTask) {
+  twab_pointsCheckResponse(data, dataTask.currentRequest);
   // Wide emotes: hold 7TV/BTTV/FFZ image chunks for padding at completion
   // (only for delegates that tell us about completion, or nothing would flush).
   if (!objc_getAssociatedObject(dataTask, &twab_emoteFlushingKey) &&
@@ -1229,40 +1231,27 @@ static UIScrollView *twab_findPagedScrollView(UIView *root) {
     return nil;
 }
 
-// Walk superclass chain to find an ivar by name.
-static Ivar twab_findIvar(id obj, const char *name) {
-    Class cls = object_getClass(obj);
-    while (cls && cls != [NSObject class]) {
-        Ivar iv = class_getInstanceVariable(cls, name);
-        if (iv) return iv;
-        cls = class_getSuperclass(cls);
-    }
-    return NULL;
-}
-
 // Home sub-tab override. selectViewControllerAtIndex: was a no-op, KVC
 // throws on Swift-private ivars, and init runs before our hooks install.
-// So in viewDidLayoutSubviews (which fires multiple times — dispatch_once
-// catches the first useful one), find the paged scroll view directly and
-// set its contentOffset to the target page, and also write the internal
-// selectedContentViewControllerIndex ivar so the top-tab indicator
-// follows the new selection.
+// Use animated:YES so UIKit calls scrollViewDidEndScrollingAnimation: on
+// the delegate, which properly transitions child VCs (theme + touch).
 // Defined later in this file — scans all windows for the "Go Ad-Free" upsell.
 static void twab_handleAdFree(void);
 
 // Returns YES when the desired page is showing (or the user took over).
 static BOOL twab_applyHomeSubTab(id self, NSString *when) {
     static BOOL userSwiped = NO;
+    static BOOL scrollStarted = NO;
     if (userSwiped) return YES;
     if (![tweakDefaults objectForKey:TWABKeyLaunchSubTab]) return YES;
     if ([tweakDefaults integerForKey:TWABKeyLaunchTab] != 0) return YES;
     NSInteger sub = [tweakDefaults integerForKey:TWABKeyLaunchSubTab];
     if (sub < 0) return YES;
+    if (scrollStarted) return YES;
 
     UIView *view = ((UIViewController *)self).view;
     UIScrollView *sv = twab_findPagedScrollView(view);
     if (!sv) return NO;
-    // The user is swiping between Home's pages — hands off from now on.
     if (sv.isTracking || sv.isDragging || sv.isDecelerating) {
         userSwiped = YES;
         return YES;
@@ -1276,16 +1265,10 @@ static BOOL twab_applyHomeSubTab(id self, NSString *when) {
     os_log(OS_LOG_DEFAULT,
         "[TWAB-Launch] sub-tab %{public}@: sub=%ld pageWidth=%.0f currentX=%.0f desired=%.0f contentSize=%{public}@",
         when, (long)sub, pageWidth, currentX, desired, NSStringFromCGSize(sv.contentSize));
-    [sv setContentOffset:CGPointMake(desired, 0) animated:NO];
 
-    // Also write the internal index ivar so the top-tab indicator agrees
-    // with where we just scrolled.
-    Ivar iv = twab_findIvar((id)self, "selectedContentViewControllerIndex");
-    if (iv) {
-        NSInteger *p = (NSInteger *)((char *)(__bridge void *)self + ivar_getOffset(iv));
-        *p = sub;
-    }
-    return NO;
+    scrollStarted = YES;
+    [sv setContentOffset:CGPointMake(desired, 0) animated:YES];
+    return YES;
 }
 
 %hook _TtC6Twitch30DiscoveryFeedTabViewController

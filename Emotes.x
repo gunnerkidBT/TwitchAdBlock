@@ -37,6 +37,7 @@
 #import "NSURL+TwitchAdBlock.h"
 #import "NSData+TwitchAdBlock.h"
 #import "NSURLSession+TwitchAdBlock.h"
+#import "ChannelPoints.h"
 
 // Forward declarations for host matchers defined in Tweak.x — needed by
 // the consolidated __NSURLSessionLocal hook below.
@@ -879,6 +880,7 @@ static NSString *twab_moderationNotice(NSString *line) {
 // Native chat socket (SocketRocket, Twitch 31.x+). `path` is only for a
 // one-time log naming which chat implementation is live.
 static NSString *twab_rewriteIRCFrame(NSString *s, const char *path) {
+    twab_pointsCheckFrame(s);
     BOOL emotes = [tweakDefaults boolForKey:TWABKeyEmotesEnabled];
     BOOL keepDeleted = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages];
     static int lastState = -1;

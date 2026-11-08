@@ -1,6 +1,7 @@
 #import "NSData+TwitchAdBlock.h"
 #import "SettingsKeys.h"
 #import <os/log.h>
+#import "ChannelPoints.h"
 
 extern NSUserDefaults *tweakDefaults;
 
@@ -370,6 +371,7 @@ id twab_stripPreloadFeedAds(id result, NSUInteger depth) {
                                              options:NSJSONReadingMutableContainers
                                                error:&error];
     if (!json || error) return self;
+    twab_pointsStashHeaders(request);
     // Handle both single operation (dict) and Apollo-batched operations (array)
     if ([json isKindOfClass:NSMutableDictionary.class]) {
         twab_applyPlatformSpoof(json);

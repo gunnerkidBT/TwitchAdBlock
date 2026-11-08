@@ -64,6 +64,9 @@ extern NSString *const TWABKeyHideBits;
 extern NSString *const TWABKeyHideChannelBar;
 // BOOL - Declutter: remove the extensions button (e.g. viewer maps) on the stream screen.
 extern NSString *const TWABKeyHideExtensions;
+// BOOL - when YES, bonus channel points (the chest that appears after watching)
+// are claimed automatically. Default NO.
+extern NSString *const TWABKeyAutoClaimPoints;
 
 // Resolves which proxy address to use right now: the user's custom value
 // when the custom-proxy toggle is on, otherwise the bundled default.

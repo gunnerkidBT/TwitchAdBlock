@@ -1,6 +1,7 @@
 #import "TWABSettingsVC.h"
 #import "Config.h"
 #import "SettingsKeys.h"
+#import "ChannelPoints.h"
 #import "NSURLSession+TwitchAdBlock.h"
 
 extern NSBundle *tweakBundle;
@@ -230,7 +231,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
             // proxy switch + custom switch + (custom-only: N proxy rows
             // + "Add proxy" row) + status
             return self.customProxyEnabled ? (3 + (NSInteger)self.proxies.count + 1) : 3;
-        case 2: return [self emotesRowCount];  // see emotesRowCount
+        case 2: return [self chatRowCount];
         case 3: return 2;  // launch dropdown + watch-limit
         case 4: return 10;  // Declutter: go ad-free, stories, recaps bar, 7TV bar, create tab, leaderboard, subscribe, bits, channel bar, extensions
         case 5: return 3;  // Tools: export, import, diagnostics
@@ -245,7 +246,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
     switch (section) {
         case 0: return LOC(@"settings.section.adblock", @"Ad Blocking");
         case 1: return self.adblockEnabled ? LOC(@"settings.section.proxy", @"Proxy") : nil;
-        case 2: return LOC(@"settings.section.emotes", @"Emotes");
+        case 2: return LOC(@"settings.section.chat", @"Chat");
         case 3: return LOC(@"settings.section.home", @"Home & Playback");
         case 4: return LOC(@"settings.section.declutter", @"Declutter");
         case 5: return LOC(@"settings.section.tools", @"Tools");
@@ -318,13 +319,21 @@ static const TWABLaunchOpt kLaunchOpts[] = {
         }
         case 2:
             if (indexPath.row == 0)
+                return [self switchCellWithTitle:LOC(@"settings.autoclaimpoints.title",
+                                                     @"Auto-Claim Bonus Points")
+                                        subtitle:LOC(@"settings.autoclaimpoints.desc",
+                                                     @"Automatically claim the bonus channel points chest when it appears.")
+                                             on:[tweakDefaults boolForKey:TWABKeyAutoClaimPoints]
+                                         action:@selector(autoClaimPointsSwitchChanged:)
+                                     identifier:@"AutoClaimPointsSwitch"];
+            if (indexPath.row == 1)
                 return [self switchCellWithTitle:LOC(@"settings.emotes.title", @"3rd-Party Emotes")
                                         subtitle:LOC(@"settings.emotes.desc",
                                                      @"Show 7TV, BetterTTV & FrankerFaceZ emotes in chat.")
                                              on:_emotesEnabled
                                          action:@selector(emotesSwitchChanged:)
                                      identifier:@"EmotesSwitch"];
-            if (indexPath.row == 1)
+            if (indexPath.row == 2)
                 return [self switchCellWithTitle:LOC(@"settings.fitwideemotes.title",
                                                      @"Keep Wide Emote Shape")
                                         subtitle:LOC(@"settings.fitwideemotes.desc",
@@ -332,7 +341,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                              on:[tweakDefaults boolForKey:TWABKeyFitWideEmotes]
                                          action:@selector(fitWideEmotesSwitchChanged:)
                                      identifier:@"FitWideEmotesSwitch"];
-            if (indexPath.row == 2)
+            if (indexPath.row == 3)
                 return [self switchCellWithTitle:LOC(@"settings.keepdeleted.title",
                                                      @"Keep Deleted Messages")
                                         subtitle:LOC(@"settings.keepdeleted.desc",
@@ -340,7 +349,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                              on:[tweakDefaults boolForKey:TWABKeyKeepDeletedMessages]
                                          action:@selector(keepDeletedSwitchChanged:)
                                      identifier:@"KeepDeletedSwitch"];
-            if (indexPath.row == 3 && [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages])
+            if (indexPath.row == 4 && [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages])
                 return [self switchCellWithTitle:LOC(@"settings.highlightdeleted.title",
                                                      @"Highlight Notes")
                                         subtitle:LOC(@"settings.highlightdeleted.desc",
@@ -510,7 +519,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                       withRowAnimation:UITableViewRowAnimationAutomatic];
         return;
     }
-    if (indexPath.section == 2 && indexPath.row == [self emotesRowCount] - 1) {
+    if (indexPath.section == 2 && indexPath.row == [self chatRowCount] - 1) {
         [self reloadEmotesTapped:[tableView cellForRowAtIndexPath:indexPath]];
         return;
     }
@@ -961,14 +970,14 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 // Emotes section rows: 3rd-party emotes, keep wide emote shape,
 // keep deleted messages, [highlight notes — only while keep deleted messages
 // is on], reload emotes (always last).
-- (NSInteger)emotesRowCount {
-    return [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 5 : 4;
+- (NSInteger)chatRowCount {
+    return [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 6 : 5;
 }
 
 - (void)keepDeletedSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyKeepDeletedMessages];
     // Show / hide the Highlight Notes sub-setting under it.
-    NSIndexPath *sub = [NSIndexPath indexPathForRow:3 inSection:2];
+    NSIndexPath *sub = [NSIndexPath indexPathForRow:4 inSection:2];
     if (sw.on) [self.tableView insertRowsAtIndexPaths:@[sub] withRowAnimation:UITableViewRowAnimationFade];
     else       [self.tableView deleteRowsAtIndexPaths:@[sub] withRowAnimation:UITableViewRowAnimationFade];
 }
@@ -1021,6 +1030,10 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     [tweakDefaults setBool:sw.on forKey:TWABKeyDisableWatchLimit];
 }
 
+- (void)autoClaimPointsSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyAutoClaimPoints];
+}
+
 - (void)hideAdFreeSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideAdFreeButton];
 }
@@ -1039,7 +1052,8 @@ static NSArray<NSString *> *twab_exportKeys(void) {
               TWABKeyKeepDeletedMessages, TWABKeyHighlightDeletedNotes,
               TWABKeyHideRecapsBar, TWABKeyFitWideEmotes, TWABKeyHideCreateTab,
               TWABKeyHideLeaderboard, TWABKeyHideSubscribe, TWABKeyHideBits,
-              TWABKeyHideChannelBar, TWABKeyHideExtensions ];
+              TWABKeyHideChannelBar, TWABKeyHideExtensions,
+              TWABKeyAutoClaimPoints ];
 }
 
 - (void)reloadEmotesTapped:(UIView *)anchor {

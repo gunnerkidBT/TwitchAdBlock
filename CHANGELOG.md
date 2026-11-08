@@ -5,6 +5,22 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.18 — November 8, 2026
+
+**Auto-claim bonus channel points.** When you watch a stream long enough, a
+bonus points chest appears in chat. Now the mod claims it for you automatically
+— no tapping needed. Turn it on in Settings → Chat → **Auto-Claim Bonus
+Points**. It's off by default.
+
+**Works with Twitch 31.9.** Verified that all features still work on the latest
+Twitch update.
+
+**Fixed:** setting your launch screen to "Following" made streams unclickable
+until you switched tabs and came back. It also showed the wrong theme (dark
+mode) until you moved away. Both are fixed.
+
+---
+
 ## v0.1.17 — November 1, 2026
 
 **Fixed:** with ad-blocking on, the Live page could show a big empty gap under the
