@@ -55,7 +55,11 @@ NSNumber *twab_proxyPingVerdict(NSURL *proxyURL) {
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
           NSInteger statusCode = [response isKindOfClass:NSHTTPURLResponse.class]
               ? ((NSHTTPURLResponse *)response).statusCode : -1;
-          BOOL isLuminous = statusCode == 200;
+          BOOL isLuminous = NO;
+          if (statusCode == 200 && data.length > 0 && data.length < 256) {
+              NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+              isLuminous = body && [body containsString:@"\"online\""];
+          }
           os_log(OS_LOG_DEFAULT,
               "[TWAB-Proxy] ping %{public}@ status=%ld err=%{public}@ luminous=%d in %.2fs",
               cacheKey, (long)statusCode, error.localizedDescription ?: @"(none)", isLuminous,
@@ -110,7 +114,8 @@ NSNumber *twab_proxyPingVerdict(NSURL *proxyURL) {
       [items filterUsingPredicate:[NSPredicate predicateWithBlock:
           ^BOOL(NSURLQueryItem *item, NSDictionary *bindings) {
         return ![item.name isEqualToString:@"token"] &&
-               ![item.name isEqualToString:@"sig"];
+               ![item.name isEqualToString:@"sig"] &&
+               ![item.name isEqualToString:@"play_session_id"];
       }]];
       qcomps.queryItems = items.count ? items : nil;
       queryString = qcomps.percentEncodedQuery ?: @"";

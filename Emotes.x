@@ -575,35 +575,30 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
         }
     }
 
-    // Master playlist routing. Two paths:
-    //   1. ttv-lol-pro V2 / Luminous proxies — rewrite URL to
-    //      proxy/<type>/<encoded "channel.m3u8?sanitized-query">.
-    //      Returns clean (ad-free) master playlist; variant URLs go
-    //      direct to Twitch CDN. Tries each configured proxy in order;
-    //      first whose /ping returns 200 wins.
-    //   2. Standard HTTP CONNECT proxies — create a proxy-configured
-    //      NSURLSession via twab_proxySessionWithAddress: and dispatch
-    //      the task there. Proxy tunnels CONNECT to usher.ttvnw.net so
-    //      Twitch's ad-targeting (which keys off client IP) misses.
-    //      Proxy session is strong-associated with the returned task so
-    //      it can't be deallocated mid-request.
-    //
-    // Subscriber/Turbo users bypass both paths — their accounts already
-    // serve ad-free playlists, so proxying just exposes their token.
-    if (twab_isMasterPlaylistHost(request.URL.host)) {
-        BOOL proxyEnabled = [tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled];
-        NSArray<NSString *> *proxyAddrs = twab_effectiveProxyAddresses();
-        os_log(OS_LOG_DEFAULT,
-            "[TWAB-URL] master playlist seen host=%{public}@ adBlock=%d proxyEnabled=%d proxies=%lu",
-            request.URL.host, adBlockOn, proxyEnabled, (unsigned long)proxyAddrs.count);
+    BOOL proxyEnabled = adBlockOn && [tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled];
+    NSArray<NSString *> *proxyAddrs = proxyEnabled ? twab_effectiveProxyAddresses() : @[];
+    BOOL isMasterPlaylist = twab_isMasterPlaylistHost(request.URL.host);
+    BOOL isGql = [request.URL.host isEqualToString:@"gql.twitch.tv"];
+    BOOL isVideoWeaver = !isMasterPlaylist && !isGql &&
+        [request.URL.host containsString:@"video-weaver"] &&
+        [request.URL.host hasSuffix:@".hls.ttvnw.net"];
 
-        if (adBlockOn && proxyEnabled && proxyAddrs.count && !twab_isExternalPlayback()) {
-            if (twab_userIsAdExempt(request.URL.query)) {
-                os_log(OS_LOG_DEFAULT,
-                    "[TWAB-URL] subscriber/turbo detected — skipping proxy host=%{public}@",
-                    request.URL.host);
-            } else {
-                BOOL rewrote = NO;
+    // Route ad-related requests through the proxy.
+    if ((isMasterPlaylist || isGql || isVideoWeaver) && proxyAddrs.count && !twab_isExternalPlayback()) {
+        if (isMasterPlaylist) {
+            os_log(OS_LOG_DEFAULT,
+                "[TWAB-URL] master playlist seen host=%{public}@ proxyEnabled=%d proxies=%lu",
+                request.URL.host, proxyEnabled, (unsigned long)proxyAddrs.count);
+        }
+
+        if (isMasterPlaylist && twab_userIsAdExempt(request.URL.query)) {
+            os_log(OS_LOG_DEFAULT,
+                "[TWAB-URL] subscriber/turbo detected — skipping proxy host=%{public}@",
+                request.URL.host);
+        } else {
+            // Try Luminous URL rewrite (master playlist only).
+            BOOL rewrote = NO;
+            if (isMasterPlaylist) {
                 for (NSString *proxyAddr in proxyAddrs) {
                     NSURL *proxyURL = twab_normalizedProxyURL(proxyAddr);
                     if (!proxyURL) continue;
@@ -614,62 +609,73 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
                             proxyURL.host, proxyURL.port ?: @0);
                         if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
                         ((NSMutableURLRequest *)request).URL = rewritten;
-                        // Inject Basic auth header — NSURLSession ignores
-                        // user:pass embedded in URLs, but the proxy needs
-                        // it to authorize the request.
                         NSString *auth = twab_basicAuthHeader(proxyURL);
                         if (auth) [(NSMutableURLRequest *)request setValue:auth forHTTPHeaderField:@"Authorization"];
                         rewrote = YES;
                         break;
                     }
                 }
+            }
 
-                if (!rewrote) {
-                    // Standard HTTP CONNECT proxy fallback on the first
-                    // parseable proxy. Cast to NSURLSession because
-                    // __NSURLSessionLocal is only forward-declared here.
-                    NSString *connectAddr = nil;
-                    for (NSString *a in proxyAddrs) {
-                        if (twab_normalizedProxyURL(a)) { connectAddr = a; break; }
-                    }
-                    if (connectAddr) {
-                        // One proxy session per real session, instead of a new one per request.
-                        static char sharedProxySessionKey, sharedProxyAddressKey;
-                        NSURLSession *proxySession = nil;
-                        @synchronized (self) {
-                            NSString *sessionAddress = objc_getAssociatedObject(self, &sharedProxyAddressKey);
-                            proxySession = [sessionAddress isEqualToString:connectAddr]
-                                ? objc_getAssociatedObject(self, &sharedProxySessionKey) : nil;
-                            if (!proxySession) {
-                                proxySession = [(NSURLSession *)self twab_proxySessionWithAddress:connectAddr];
-                                objc_setAssociatedObject(self, &sharedProxySessionKey, proxySession,
-                                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                                objc_setAssociatedObject(self, &sharedProxyAddressKey, connectAddr,
-                                                         OBJC_ASSOCIATION_COPY_NONATOMIC);
-                            }
-                        }
-                        if (proxySession) {
-                            _td[@"twab_inProxyDispatch"] = @YES;
-                            NSURLSessionDataTask *task = [proxySession dataTaskWithRequest:request];
-                            _td[@"twab_inProxyDispatch"] = nil;
-                            if (task) {
-                                static char proxySessionKey;
-                                objc_setAssociatedObject(task, &proxySessionKey, proxySession,
-                                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                                os_log(OS_LOG_DEFAULT,
-                                    "[TWAB-URL] routed master playlist via HTTP CONNECT proxy host=%{public}@",
-                                    request.URL.host);
-                                // Only IVS tracks tasks by number; other delegates keep the real task.
-                                if ([NSStringFromClass([((NSURLSession *)self).delegate class]) isEqualToString:@"IVSPlayerURLSessionDelegate"])
-                                    return twab_playerTaskForProxiedTask(task);
-                                return task;
-                            }
-                        }
-                    }
-                    os_log(OS_LOG_DEFAULT,
-                        "[TWAB-URL] master playlist NOT rewritten/routed host=%{public}@",
-                        request.URL.host);
+            if (!rewrote) {
+                // HTTP CONNECT proxy fallback — used for both master
+                // playlist (when not Luminous) and GQL requests.
+                NSString *connectAddr = nil;
+                for (NSString *a in proxyAddrs) {
+                    if (twab_normalizedProxyURL(a)) { connectAddr = a; break; }
                 }
+                if (connectAddr) {
+                    static char sharedProxySessionKey, sharedProxyAddressKey;
+                    NSURLSession *proxySession = nil;
+                    @synchronized (self) {
+                        NSString *sessionAddress = objc_getAssociatedObject(self, &sharedProxyAddressKey);
+                        proxySession = [sessionAddress isEqualToString:connectAddr]
+                            ? objc_getAssociatedObject(self, &sharedProxySessionKey) : nil;
+                        if (!proxySession) {
+                            proxySession = [(NSURLSession *)self twab_proxySessionWithAddress:connectAddr];
+                            objc_setAssociatedObject(self, &sharedProxySessionKey, proxySession,
+                                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                            objc_setAssociatedObject(self, &sharedProxyAddressKey, connectAddr,
+                                                     OBJC_ASSOCIATION_COPY_NONATOMIC);
+                        }
+                    }
+                    if (proxySession) {
+                        if (isMasterPlaylist && request.URL.query.length) {
+                            NSURLComponents *uc = [NSURLComponents componentsWithURL:request.URL resolvingAgainstBaseURL:NO];
+                            NSMutableArray *qi = [uc.queryItems mutableCopy];
+                            NSUInteger before = qi.count;
+                            [qi filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSURLQueryItem *item, NSDictionary *b) {
+                                return ![item.name isEqualToString:@"play_session_id"];
+                            }]];
+                            if (qi.count < before) {
+                                uc.queryItems = qi.count ? qi : nil;
+                                if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
+                                ((NSMutableURLRequest *)request).URL = uc.URL;
+                                os_log(OS_LOG_DEFAULT, "[TWAB-URL] stripped play_session_id from CONNECT path");
+                            }
+                        }
+                        _td[@"twab_inProxyDispatch"] = @YES;
+                        NSURLSessionDataTask *task = [proxySession dataTaskWithRequest:request];
+                        _td[@"twab_inProxyDispatch"] = nil;
+                        if (task) {
+                            static char proxySessionKey;
+                            objc_setAssociatedObject(task, &proxySessionKey, proxySession,
+                                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                            os_log(OS_LOG_DEFAULT,
+                                "[TWAB-URL] routed %{public}@ via HTTP CONNECT proxy host=%{public}@",
+                                isMasterPlaylist ? @"master playlist" : isGql ? @"GQL" : @"video-weaver",
+                                request.URL.host);
+                            if (isMasterPlaylist &&
+                                [NSStringFromClass([((NSURLSession *)self).delegate class]) isEqualToString:@"IVSPlayerURLSessionDelegate"])
+                                return twab_playerTaskForProxiedTask(task);
+                            return task;
+                        }
+                    }
+                }
+                os_log(OS_LOG_DEFAULT,
+                    "[TWAB-URL] %{public}@ NOT routed host=%{public}@",
+                    isMasterPlaylist ? @"master playlist" : isGql ? @"GQL" : @"video-weaver",
+                    request.URL.host);
             }
         }
     }

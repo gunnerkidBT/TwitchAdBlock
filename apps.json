@@ -22,6 +22,15 @@
       "versions": [
         {
           "version": "31.9",
+          "buildVersion": "263092206363475384",
+          "date": "2026-11-12T00:00:00Z",
+          "localizedDescription": "TwitchMods 0.1.19 for Twitch 31.9\n\n**Fixed ad blocking.** Ads were getting through even with the proxy on. Fixed the issue — ads should be blocked again.",
+          "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.9-0.1.19/tv.twitch-31.9-TwitchAdBlock-0.1.19.ipa",
+          "size": 196556351,
+          "minOSVersion": "16.4"
+        },
+        {
+          "version": "31.9",
           "buildVersion": "263092206363475383",
           "date": "2026-11-08T00:00:00Z",
           "localizedDescription": "TwitchMods 0.1.18 for Twitch 31.9\n\n**Auto-claim bonus channel points.** When you watch a stream long enough, a bonus points chest appears in chat. Now the mod claims it for you automatically — no tapping needed. Turn it on in Settings → Chat → Auto-Claim Bonus Points. It's off by default.\n\n**Works with Twitch 31.9.** Verified that all features still work on the latest Twitch update.\n\n**Fixed:** setting your launch screen to \"Following\" made streams unclickable until you switched tabs and came back. It also showed the wrong theme (dark mode) until you moved away. Both are fixed.",
@@ -118,10 +127,10 @@
         }
       },
       "version": "31.9",
-      "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.9-0.1.18/tv.twitch-31.9-TwitchAdBlock-0.1.18.ipa",
-      "size": 199752793,
-      "versionDate": "2026-11-08T00:00:00Z",
-      "versionDescription": "TwitchMods 0.1.18 for Twitch 31.9\n\n**Auto-claim bonus channel points.** When you watch a stream long enough, a bonus points chest appears in chat. Now the mod claims it for you automatically — no tapping needed. Turn it on in Settings → Chat → Auto-Claim Bonus Points. It's off by default.\n\n**Works with Twitch 31.9.** Verified that all features still work on the latest Twitch update.\n\n**Fixed:** setting your launch screen to \"Following\" made streams unclickable until you switched tabs and came back. It also showed the wrong theme (dark mode) until you moved away. Both are fixed."
+      "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.9-0.1.19/tv.twitch-31.9-TwitchAdBlock-0.1.19.ipa",
+      "size": 196556351,
+      "versionDate": "2026-11-12T00:00:00Z",
+      "versionDescription": "TwitchMods 0.1.19 for Twitch 31.9\n\n**Fixed ad blocking.** Ads were getting through even with the proxy on. Fixed the issue — ads should be blocked again."
     }
   ],
   "news": []

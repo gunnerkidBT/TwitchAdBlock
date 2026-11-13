@@ -5,6 +5,13 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.19 — November 12, 2026
+
+**Fixed ad blocking.** Ads were getting through even with the proxy on. Fixed
+the issue — ads should be blocked again.
+
+---
+
 ## v0.1.18 — November 8, 2026
 
 **Auto-claim bonus channel points.** When you watch a stream long enough, a
