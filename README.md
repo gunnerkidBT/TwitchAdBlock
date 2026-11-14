@@ -164,6 +164,13 @@ page and jump to **Install**.
 
 ---
 
+## Community
+
+Join the Telegram group for updates, help, and discussion:
+**https://t.me/+gj-e1h1I6d1lYjhh**
+
+---
+
 ## Credits & license
 
 - Original project by [level3tjg](https://github.com/level3tjg) —
