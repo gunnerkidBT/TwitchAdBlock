@@ -5,6 +5,14 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.20 — November 14, 2026
+
+**Fixed ad blocking (for real this time).** Twitch changed how they serve ads
+on their backend. The previous fix didn't fully cover it — this one does.
+Ad blocking should now work reliably again.
+
+---
+
 ## v0.1.19 — November 12, 2026
 
 **Fixed ad blocking.** Ads were getting through even with the proxy on. Fixed

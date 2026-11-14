@@ -118,6 +118,39 @@ BOOL twab_isExternalPlayback(void) {
   return cast || air;
 }
 
+// ─── Ad detection logging ───────────────────────────────────────────────────
+// Scans m3u8 variant playlist response data for Twitch SSAI ad markers and
+// logs when ads are detected. Lightweight — only runs on playlist-host
+// responses whose URL ends in .m3u8. Non-static so the proxy delegate can
+// call it too.
+static _Atomic uint64_t twab_adDetectCount;
+static _Atomic double twab_lastAdLogTime;
+
+void twab_checkPlaylistForAds(NSData *data, NSURLRequest *request) {
+  if (!data.length || !request) return;
+  NSString *host = request.URL.host;
+  if (!host || !twab_isPlaylistHost(host)) return;
+  NSString *path = request.URL.path;
+  if (!path || ![path hasSuffix:@".m3u8"]) return;
+  NSRange range = NSMakeRange(0, MIN(data.length, 8192));
+  NSString *text = [[NSString alloc] initWithData:[data subdataWithRange:range]
+                                         encoding:NSUTF8StringEncoding];
+  if (!text) return;
+  BOOL hasAd = [text containsString:@"stitched-ad"] ||
+               [text containsString:@"SCTE35-OUT"] ||
+               [text containsString:@"X-TV-TWITCH-AD"] ||
+               [text containsString:@"CLASS=\"twitch-ad"] ||
+               [text containsString:@"video-weaver"];
+  if (!hasAd) return;
+  uint64_t count = atomic_fetch_add(&twab_adDetectCount, 1) + 1;
+  double now = CFAbsoluteTimeGetCurrent();
+  double last = atomic_exchange(&twab_lastAdLogTime, now);
+  if (now - last < 5.0 && count > 1) return;
+  os_log(OS_LOG_DEFAULT,
+    "[TWAB-AD-DETECT] ad content in playlist #%llu host=%{public}@ path=%{public}@",
+    count, host, path);
+}
+
 // Server-side video ad blocking
 
 %hook NSURLSession
@@ -549,6 +582,7 @@ static BOOL twab_completeHeldEmote(id delegate, NSURLSession *session, NSURLSess
 }
 
 static NSData *twab_filteredFeedData(id delegate, NSData *data, NSURLSessionDataTask *dataTask) {
+  twab_checkPlaylistForAds(data, dataTask.currentRequest);
   twab_pointsCheckResponse(data, dataTask.currentRequest);
   // Wide emotes: hold 7TV/BTTV/FFZ image chunks for padding at completion
   // (only for delegates that tell us about completion, or nothing would flush).

@@ -579,12 +579,18 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
     NSArray<NSString *> *proxyAddrs = proxyEnabled ? twab_effectiveProxyAddresses() : @[];
     BOOL isMasterPlaylist = twab_isMasterPlaylistHost(request.URL.host);
     BOOL isGql = [request.URL.host isEqualToString:@"gql.twitch.tv"];
-    BOOL isVideoWeaver = !isMasterPlaylist && !isGql &&
-        [request.URL.host containsString:@"video-weaver"] &&
-        [request.URL.host hasSuffix:@".hls.ttvnw.net"];
+    // Proxy variant playlists (.m3u8) and video-weaver hosts but NOT
+    // raw .ts segment fetches — those are bulk video data that would
+    // kill throughput if tunnelled through the proxy.
+    BOOL isPlaylistOrWeaver = NO;
+    if (!isMasterPlaylist && !isGql && twab_isPlaylistHost(request.URL.host)) {
+        NSString *lastComp = request.URL.lastPathComponent;
+        isPlaylistOrWeaver = [lastComp hasSuffix:@".m3u8"] ||
+            [request.URL.host containsString:@"video-weaver"];
+    }
 
     // Route ad-related requests through the proxy.
-    if ((isMasterPlaylist || isGql || isVideoWeaver) && proxyAddrs.count && !twab_isExternalPlayback()) {
+    if ((isMasterPlaylist || isGql || isPlaylistOrWeaver) && proxyAddrs.count && !twab_isExternalPlayback()) {
         if (isMasterPlaylist) {
             os_log(OS_LOG_DEFAULT,
                 "[TWAB-URL] master playlist seen host=%{public}@ proxyEnabled=%d proxies=%lu",
@@ -663,7 +669,7 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
                                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                             os_log(OS_LOG_DEFAULT,
                                 "[TWAB-URL] routed %{public}@ via HTTP CONNECT proxy host=%{public}@",
-                                isMasterPlaylist ? @"master playlist" : isGql ? @"GQL" : @"video-weaver",
+                                isMasterPlaylist ? @"master playlist" : isGql ? @"GQL" : @"playlist/weaver",
                                 request.URL.host);
                             if (isMasterPlaylist &&
                                 [NSStringFromClass([((NSURLSession *)self).delegate class]) isEqualToString:@"IVSPlayerURLSessionDelegate"])
@@ -674,7 +680,7 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
                 }
                 os_log(OS_LOG_DEFAULT,
                     "[TWAB-URL] %{public}@ NOT routed host=%{public}@",
-                    isMasterPlaylist ? @"master playlist" : isGql ? @"GQL" : @"video-weaver",
+                    isMasterPlaylist ? @"master playlist" : isGql ? @"GQL" : @"playlist/weaver",
                     request.URL.host);
             }
         }

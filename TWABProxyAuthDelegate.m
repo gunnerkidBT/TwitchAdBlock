@@ -2,6 +2,8 @@
 #import <objc/runtime.h>
 #import <stdatomic.h>
 
+extern void twab_checkPlaylistForAds(NSData *data, NSURLRequest *request);
+
 // IVSPlayerURLSessionDelegate tracks requests by taskIdentifier and answers a response
 // it can't find with "cancel" (-[IVSPlayerURLSessionDelegate
 // URLSession:dataTask:didReceiveResponse:completionHandler:]). A proxy session numbers
@@ -85,6 +87,7 @@ didReceiveResponse:(NSURLResponse *)response
 }
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
+    twab_checkPlaylistForAds(data, dataTask.currentRequest);
     if ([self.inner respondsToSelector:_cmd])
         [(id<NSURLSessionDataDelegate>)self.inner URLSession:session dataTask:twab_taskForInner(dataTask) didReceiveData:data];
 }
