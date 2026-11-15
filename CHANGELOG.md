@@ -5,6 +5,30 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.21 — November 15, 2026
+
+**Hide community highlights.** New master toggle in Settings → Declutter that
+lets you hide distracting overlays above chat — pinned messages, hype trains,
+predictions, polls, sub goals, and Twitch Drops notifications. Each one has its
+own sub-toggle so you can pick exactly what to hide.
+
+**Skip proxy for specific channels.** Some channels don't run ads at all. You
+can now list channels that should skip the ad-block proxy entirely in
+Settings → Proxy → **Skip Proxy for Channels**. Subscribed channels already
+skip it automatically.
+
+**Hide clip button.** New toggle to remove the clip button from the video
+player controls.
+
+**Fixed Home launch screen on Twitch 31.9.** The "Home → Following", "Home →
+Live", and "Home → Clips" options now work again on the latest Twitch version.
+
+**Fixed settings import.** Importing an old settings file no longer causes
+"an error has occurred trying to play this content" — stale settings are
+properly cleared first.
+
+---
+
 ## v0.1.20 — November 14, 2026
 
 **Fixed ad blocking (for real this time).** Twitch changed how they serve ads

@@ -179,6 +179,22 @@ static NSString *twab_fakeIdForWord(NSString *word) {
     return result;
 }
 
+static NSString *twab_fakeIdForWord_inRoom(NSString *word, NSString *roomId) {
+    __block NSString *result = nil;
+    dispatch_sync(twab_emoteQueue(), ^{
+        NSDictionary *e = twab_byWord()[word];
+        if (!e) return;
+        NSString *fakeId = e[@"fake"];
+        NSDictionary *full = twab_byFakeId()[fakeId];
+        if (!full) return;
+        NSString *emoteRoom = full[@"room"];
+        if ([emoteRoom isEqualToString:TWAB_GLOBAL_ROOM] ||
+            [emoteRoom isEqualToString:roomId])
+            result = fakeId;
+    });
+    return result;
+}
+
 static NSDictionary *twab_entryForFakeId(NSString *fakeId) {
     __block NSDictionary *result = nil;
     dispatch_sync(twab_emoteQueue(), ^{
@@ -601,6 +617,10 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
             os_log(OS_LOG_DEFAULT,
                 "[TWAB-URL] subscriber/turbo detected — skipping proxy host=%{public}@",
                 request.URL.host);
+        } else if (isMasterPlaylist && twab_channelIsWhitelisted(request.URL)) {
+            os_log(OS_LOG_DEFAULT,
+                "[TWAB-URL] whitelisted channel — skipping proxy path=%{public}@",
+                request.URL.path);
         } else {
             // Try Luminous URL rewrite (master playlist only).
             BOOL rewrote = NO;
@@ -671,7 +691,7 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
                                 "[TWAB-URL] routed %{public}@ via HTTP CONNECT proxy host=%{public}@",
                                 isMasterPlaylist ? @"master playlist" : isGql ? @"GQL" : @"playlist/weaver",
                                 request.URL.host);
-                            if (isMasterPlaylist &&
+                            if ((isMasterPlaylist || isPlaylistOrWeaver) &&
                                 [NSStringFromClass([((NSURLSession *)self).delegate class]) isEqualToString:@"IVSPlayerURLSessionDelegate"])
                                 return twab_playerTaskForProxiedTask(task);
                             return task;
@@ -764,12 +784,14 @@ static NSString *twab_injectIRCEmotes(NSString *line) {
 
     // Scan words for matches. Positions are code-point-based, so we track a
     // grapheme-cluster cursor separately from any UTF-16 indexing.
+    // Room-aware: only match emotes belonging to this channel or globals.
     NSMutableArray<NSString *> *newEntries = [NSMutableArray array];
     NSArray<NSString *> *words = [text componentsSeparatedByString:@" "];
     NSUInteger codePos = 0;
     for (NSString *word in words) {
         NSUInteger wordLen = twab_charCount(word, NSMakeRange(0, word.length));
-        NSString *fakeId = twab_fakeIdForWord(word);
+        NSString *fakeId = roomId.length ? twab_fakeIdForWord_inRoom(word, roomId)
+                                         : twab_fakeIdForWord(word);
         if (fakeId && wordLen > 0) {
             NSUInteger end = codePos + wordLen - 1;
             [newEntries addObject:[NSString stringWithFormat:@"%@:%lu-%lu",
@@ -886,6 +908,59 @@ static NSString *twab_moderationNotice(NSString *line) {
         NSUUID.UUID.UUIDString.lowercaseString, roomID, ts, channel, text];
 }
 
+// Filter Hermes PubSub notification frames that deliver community highlight
+// data (predictions, polls, hype trains) via WebSocket. Returns a replacement
+// frame to suppress the notification, or nil to pass the original through.
+static NSString *twab_filterHermesNotification(NSString *frame) {
+    if (!frame.length || [frame characterAtIndex:0] != '{') return nil;
+    if (![tweakDefaults boolForKey:TWABKeyHideCommunityHighlights]) return nil;
+
+    NSRange notifRange = [frame rangeOfString:@"\"notification\""];
+    if (notifRange.location == NSNotFound) return nil;
+    NSRange pubsubRange = [frame rangeOfString:@"\"pubsub\""];
+    if (pubsubRange.location == NSNotFound) return nil;
+
+    NSData *data = [frame dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return nil;
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![json isKindOfClass:NSDictionary.class]) return nil;
+
+    NSDictionary *notif = json[@"notification"];
+    if (![notif isKindOfClass:NSDictionary.class]) return nil;
+    if (![@"pubsub" isEqualToString:notif[@"type"]]) return nil;
+
+    NSString *pubsub = notif[@"pubsub"];
+    if (![pubsub isKindOfClass:NSString.class] || !pubsub.length) return nil;
+
+    if ([tweakDefaults boolForKey:TWABKeyHidePredictions] &&
+        [pubsub rangeOfString:@"\"outcomes\""].location != NSNotFound &&
+        [pubsub rangeOfString:@"\"color\""].location != NSNotFound) {
+        os_log(OS_LOG_DEFAULT, "[TWAB-Hide] dropped prediction WS notification");
+        return @"{\"type\":\"keepalive\"}";
+    }
+
+    if ([tweakDefaults boolForKey:TWABKeyHidePolls] &&
+        [pubsub rangeOfString:@"\"poll\"" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        os_log(OS_LOG_DEFAULT, "[TWAB-Hide] dropped poll WS notification");
+        return @"{\"type\":\"keepalive\"}";
+    }
+
+    if ([tweakDefaults boolForKey:TWABKeyHideHypeTrains] &&
+        ([pubsub rangeOfString:@"\"hype-train\"" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+         [pubsub rangeOfString:@"\"hype_train\"" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+        os_log(OS_LOG_DEFAULT, "[TWAB-Hide] dropped hype train WS notification");
+        return @"{\"type\":\"keepalive\"}";
+    }
+
+    if ([tweakDefaults boolForKey:TWABKeyHideDrops] &&
+        [pubsub rangeOfString:@"\"drop\"" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        os_log(OS_LOG_DEFAULT, "[TWAB-Hide] dropped drops WS notification");
+        return @"{\"type\":\"keepalive\"}";
+    }
+
+    return nil;
+}
+
 // Rewrite one received chat text frame (one or more CRLF-separated IRC
 // lines). Returns the rewritten frame, or nil to deliver the original.
 // Shared by the native chat socket (NSURLSessionWebSocketTask) and the React
@@ -939,6 +1014,13 @@ static twab_recvHandler twab_wrapHandler(twab_recvHandler h) {
     if (!h) return h;
     if (objc_getAssociatedObject(h, &twab_handlerWrappedKey)) return h;
     twab_recvHandler wrapped = ^(NSURLSessionWebSocketMessage *msg, NSError *err) {
+        if (msg.type == NSURLSessionWebSocketMessageTypeString) {
+            NSString *filtered = twab_filterHermesNotification(msg.string);
+            if (filtered) {
+                h([[NSURLSessionWebSocketMessage alloc] initWithString:filtered], err);
+                return;
+            }
+        }
         NSString *rewritten = (msg.type == NSURLSessionWebSocketMessageTypeString)
             ? twab_rewriteIRCFrame(msg.string, "native chat (NSURLSessionWebSocketTask)") : nil;
         h(rewritten ? [[NSURLSessionWebSocketMessage alloc] initWithString:rewritten] : msg, err);
@@ -975,6 +1057,10 @@ static twab_recvHandler twab_wrapHandler(twab_recvHandler h) {
 %group RNWSString
 %hook RCTWebSocketModule
 - (void)webSocket:(id)webSocket didReceiveMessageWithString:(NSString *)string {
+    if ([string isKindOfClass:NSString.class]) {
+        NSString *filtered = twab_filterHermesNotification(string);
+        if (filtered) { %orig(webSocket, filtered); return; }
+    }
     NSString *rewritten = [string isKindOfClass:NSString.class]
         ? twab_rewriteIRCFrame(string, "React Native chat (SocketRocket)") : nil;
     %orig(webSocket, rewritten ?: string);
@@ -985,6 +1071,10 @@ static twab_recvHandler twab_wrapHandler(twab_recvHandler h) {
 %group RNWSAny
 %hook RCTWebSocketModule
 - (void)webSocket:(id)webSocket didReceiveMessage:(id)message {
+    if ([message isKindOfClass:NSString.class]) {
+        NSString *filtered = twab_filterHermesNotification(message);
+        if (filtered) { %orig(webSocket, filtered); return; }
+    }
     NSString *rewritten = [message isKindOfClass:NSString.class]
         ? twab_rewriteIRCFrame(message, "React Native chat (SocketRocket)") : nil;
     %orig(webSocket, rewritten ?: message);

@@ -64,9 +64,31 @@ extern NSString *const TWABKeyHideBits;
 extern NSString *const TWABKeyHideChannelBar;
 // BOOL - Declutter: remove the extensions button (e.g. viewer maps) on the stream screen.
 extern NSString *const TWABKeyHideExtensions;
+// BOOL - Declutter: hide the sub goal progress bar above chat (community highlight sub-toggle).
+extern NSString *const TWABKeyHideSubGoal;
+// BOOL - Declutter: master toggle for hiding community highlights above chat.
+extern NSString *const TWABKeyHideCommunityHighlights;
+// BOOL - Declutter: hide pinned chat messages (community highlight) via GQL.
+extern NSString *const TWABKeyHidePinnedMessages;
+// BOOL - Declutter: hide hype trains (community highlight) via GQL.
+extern NSString *const TWABKeyHideHypeTrains;
+// BOOL - Declutter: hide predictions (community highlight) via GQL.
+extern NSString *const TWABKeyHidePredictions;
+// BOOL - Declutter: hide polls (community highlight) via GQL.
+extern NSString *const TWABKeyHidePolls;
+// BOOL - Declutter: hide sub goal progress bar (community highlight) via GQL.
+extern NSString *const TWABKeyHideSubGoal;
+// BOOL - Declutter: hide Twitch Drops notifications (community highlight) via GQL.
+extern NSString *const TWABKeyHideDrops;
+// NSInteger - Declutter: auto-dismiss pinned chat messages after N seconds (0 = never).
+extern NSString *const TWABKeyDismissPinnedSeconds;
+// BOOL - Declutter: hide the clip button on the player controls.
+extern NSString *const TWABKeyHideClipButton;
 // BOOL - when YES, bonus channel points (the chest that appears after watching)
 // are claimed automatically. Default NO.
 extern NSString *const TWABKeyAutoClaimPoints;
+// NSString (comma-separated) - channels that skip the ad-block proxy.
+extern NSString *const TWABKeyProxyWhitelist;
 
 // Resolves which proxy address to use right now: the user's custom value
 // when the custom-proxy toggle is on, otherwise the bundled default.
@@ -93,3 +115,7 @@ NSArray<NSString *> *twab_effectiveProxyAddresses(void);
 // JSON-encoded blob; this parses it leniently and returns NO on any
 // malformed input.
 BOOL twab_userIsAdExempt(NSString *queryString);
+
+// Returns YES if the channel extracted from the Usher URL path is in the
+// user's proxy-skip whitelist. Path format: /api/channel/hls/<name>.m3u8
+BOOL twab_channelIsWhitelisted(NSURL *usherURL);

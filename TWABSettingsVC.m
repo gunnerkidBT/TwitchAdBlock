@@ -229,11 +229,11 @@ static const TWABLaunchOpt kLaunchOpts[] = {
             if (!self.adblockEnabled) return 0;
             if (!self.proxyEnabled) return 1;
             // proxy switch + custom switch + (custom-only: N proxy rows
-            // + "Add proxy" row) + status
-            return self.customProxyEnabled ? (3 + (NSInteger)self.proxies.count + 1) : 3;
+            // + "Add proxy" row) + status + whitelist
+            return self.customProxyEnabled ? (3 + (NSInteger)self.proxies.count + 2) : 4;
         case 2: return [self chatRowCount];
         case 3: return 2;  // launch dropdown + watch-limit
-        case 4: return 10;  // Declutter: go ad-free, stories, recaps bar, 7TV bar, create tab, leaderboard, subscribe, bits, channel bar, extensions
+        case 4: return [self declutterRowCount];
         case 5: return 3;  // Tools: export, import, diagnostics
         case 6: return 0;  // version footer only
         default: return 0;
@@ -311,11 +311,15 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                              on:_customProxyEnabled
                                          action:@selector(customProxySwitchChanged:)
                                      identifier:@"CustomProxySwitch"];
-            if (!self.customProxyEnabled) return [self proxyStatusCell];
+            if (!self.customProxyEnabled) {
+                if (row == 2) return [self proxyStatusCell];
+                return [self proxyWhitelistCell];
+            }
             NSInteger proxyIdx = [self proxyIndexForRow:row];
             if (proxyIdx >= 0) return [self proxyRowCellForIndex:proxyIdx];
             if (row == [self addProxyRowIndex]) return [self addProxyCell];
-            return [self proxyStatusCell];
+            if (row == [self statusRowIndex]) return [self proxyStatusCell];
+            return [self proxyWhitelistCell];
         }
         case 2:
             if (indexPath.row == 0)
@@ -443,6 +447,75 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                              on:[tweakDefaults boolForKey:TWABKeyHideExtensions]
                                          action:@selector(hideExtensionsSwitchChanged:)
                                      identifier:@"HideExtensionsSwitch"];
+            if (indexPath.row == 10)
+                return [self switchCellWithTitle:LOC(@"settings.hidecommunity.title",
+                                                     @"Hide Community Highlights")
+                                        subtitle:LOC(@"settings.hidecommunity.desc",
+                                                     @"Remove community highlight banners above chat (pinned messages, hype trains, predictions, polls, sub goals, drops). Applies the next time you open a stream.")
+                                             on:[tweakDefaults boolForKey:TWABKeyHideCommunityHighlights]
+                                         action:@selector(hideCommunityHighlightsSwitchChanged:)
+                                     identifier:@"HideCommunityHighlightsSwitch"];
+            if ([tweakDefaults boolForKey:TWABKeyHideCommunityHighlights]) {
+                if (indexPath.row == 11)
+                    return [self switchCellWithTitle:LOC(@"settings.hidepinnedmessages.title",
+                                                         @"Pinned Messages")
+                                            subtitle:LOC(@"settings.hidepinnedmessages.desc",
+                                                         @"Hide mod-pinned messages above chat.")
+                                                 on:[tweakDefaults boolForKey:TWABKeyHidePinnedMessages]
+                                             action:@selector(hidePinnedMessagesSwitchChanged:)
+                                         identifier:@"HidePinnedMessagesSwitch"];
+                if (indexPath.row == 12)
+                    return [self switchCellWithTitle:LOC(@"settings.hidehypetrains.title",
+                                                         @"Hype Trains")
+                                            subtitle:LOC(@"settings.hidehypetrains.desc",
+                                                         @"Hide hype train banners above chat.")
+                                                 on:[tweakDefaults boolForKey:TWABKeyHideHypeTrains]
+                                             action:@selector(hideHypeTrainsSwitchChanged:)
+                                         identifier:@"HideHypeTrainsSwitch"];
+                if (indexPath.row == 13)
+                    return [self switchCellWithTitle:LOC(@"settings.hidepredictions.title",
+                                                         @"Predictions")
+                                            subtitle:LOC(@"settings.hidepredictions.desc",
+                                                         @"Hide prediction banners above chat.")
+                                                 on:[tweakDefaults boolForKey:TWABKeyHidePredictions]
+                                             action:@selector(hidePredictionsSwitchChanged:)
+                                         identifier:@"HidePredictionsSwitch"];
+                if (indexPath.row == 14)
+                    return [self switchCellWithTitle:LOC(@"settings.hidepolls.title",
+                                                         @"Polls")
+                                            subtitle:LOC(@"settings.hidepolls.desc",
+                                                         @"Hide poll banners above chat.")
+                                                 on:[tweakDefaults boolForKey:TWABKeyHidePolls]
+                                             action:@selector(hidePollsSwitchChanged:)
+                                         identifier:@"HidePollsSwitch"];
+                if (indexPath.row == 15)
+                    return [self switchCellWithTitle:LOC(@"settings.hidesubgoal.title",
+                                                         @"Sub Goal")
+                                            subtitle:LOC(@"settings.hidesubgoal.desc",
+                                                         @"Hide the subscription goal progress bar above chat.")
+                                                 on:[tweakDefaults boolForKey:TWABKeyHideSubGoal]
+                                             action:@selector(hideSubGoalSwitchChanged:)
+                                         identifier:@"HideSubGoalSwitch"];
+                if (indexPath.row == 16)
+                    return [self switchCellWithTitle:LOC(@"settings.hidedrops.title",
+                                                         @"Drops")
+                                            subtitle:LOC(@"settings.hidedrops.desc",
+                                                         @"Hide Twitch Drops campaign notifications above chat.")
+                                                 on:[tweakDefaults boolForKey:TWABKeyHideDrops]
+                                             action:@selector(hideDropsSwitchChanged:)
+                                         identifier:@"HideDropsSwitch"];
+            }
+            {
+                NSInteger clipRow = [tweakDefaults boolForKey:TWABKeyHideCommunityHighlights] ? 17 : 11;
+                if (indexPath.row == clipRow)
+                    return [self switchCellWithTitle:LOC(@"settings.hideclipbutton.title",
+                                                         @"Hide Clip Button")
+                                            subtitle:LOC(@"settings.hideclipbutton.desc",
+                                                         @"Remove the clip button from the player controls. Applies the next time you open a stream.")
+                                                 on:[tweakDefaults boolForKey:TWABKeyHideClipButton]
+                                             action:@selector(hideClipButtonSwitchChanged:)
+                                         identifier:@"HideClipButtonSwitch"];
+            }
             return [self switchCellWithTitle:LOC(@"settings.hidecreatetab.title",
                                                  @"Hide “+” (Create) Button")
                                     subtitle:LOC(@"settings.hidecreatetab.desc",
@@ -511,6 +584,11 @@ static const TWABLaunchOpt kLaunchOpts[] = {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 1 && self.adblockEnabled && self.proxyEnabled &&
+        indexPath.row == [self statusRowIndex] + 1) {
+        [self presentWhitelistEditor];
+        return;
+    }
     if (indexPath.section == 1 && self.adblockEnabled && self.proxyEnabled &&
         self.customProxyEnabled && indexPath.row == [self addProxyRowIndex]) {
         [self.proxies addObject:@""];
@@ -585,6 +663,73 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                               style:UIAlertActionStyleCancel
                                             handler:nil]];
     // iPad popover anchor — required when presentation style is action sheet.
+    sheet.popoverPresentationController.sourceView = anchor;
+    sheet.popoverPresentationController.sourceRect = anchor.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+#pragma mark - Pinned messages dismiss delay
+
+static const NSInteger kPinnedDismissOptions[] = { 0, 5, 10, 15, 30 };
+static const char *kPinnedDismissTitles[] = { "Never", "5 seconds", "10 seconds", "15 seconds", "30 seconds" };
+#define TWAB_PINNED_OPT_COUNT (sizeof(kPinnedDismissOptions) / sizeof(kPinnedDismissOptions[0]))
+
+- (NSUInteger)currentPinnedDismissIndex {
+    NSInteger saved = [tweakDefaults integerForKey:TWABKeyDismissPinnedSeconds];
+    for (NSUInteger i = 0; i < TWAB_PINNED_OPT_COUNT; i++) {
+        if (kPinnedDismissOptions[i] == saved) return i;
+    }
+    return 0;
+}
+
+- (UITableViewCell *)pinnedDismissDropdownCell {
+    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"PinnedDismiss"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
+                                      reuseIdentifier:@"PinnedDismiss"];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    }
+    NSString *title = LOC(@"settings.dismisspinned.title", @"Auto-Dismiss Community Highlights");
+    NSString *detail = [NSString stringWithUTF8String:
+        kPinnedDismissTitles[[self currentPinnedDismissIndex]]];
+    if ([cell respondsToSelector:@selector(defaultContentConfiguration)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+        UIListContentConfiguration *cfg = [cell defaultContentConfiguration];
+        cfg.text = title;
+        cfg.secondaryText = detail;
+        [cell setContentConfiguration:cfg];
+#pragma clang diagnostic pop
+    } else {
+        cell.textLabel.text = title;
+        cell.detailTextLabel.text = detail;
+    }
+    return cell;
+}
+
+- (void)presentPinnedDismissPicker:(UIView *)anchor {
+    UIAlertController *sheet = [UIAlertController
+        alertControllerWithTitle:LOC(@"settings.dismisspinned.title", @"Auto-Dismiss Community Highlights")
+                         message:LOC(@"settings.dismisspinned.desc",
+                                     @"Automatically dismiss community highlights (pinned messages) after a delay.")
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    NSUInteger current = [self currentPinnedDismissIndex];
+    for (NSUInteger i = 0; i < TWAB_PINNED_OPT_COUNT; i++) {
+        NSString *title = [NSString stringWithUTF8String:kPinnedDismissTitles[i]];
+        if (i == current) title = [@"✓  " stringByAppendingString:title];
+        NSInteger seconds = kPinnedDismissOptions[i];
+        __weak typeof(self) weakSelf = self;
+        [sheet addAction:[UIAlertAction actionWithTitle:title
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *_) {
+            [tweakDefaults setInteger:seconds forKey:TWABKeyDismissPinnedSeconds];
+            [weakSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:4]
+                              withRowAnimation:UITableViewRowAnimationNone];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:LOC(@"settings.launch.cancel", @"Cancel")
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
     sheet.popoverPresentationController.sourceView = anchor;
     sheet.popoverPresentationController.sourceRect = anchor.bounds;
     [self presentViewController:sheet animated:YES completion:nil];
@@ -718,6 +863,32 @@ static const NSInteger kProxyTextFieldTag = 0xABCD;
         cell.textLabel.text = title;
         cell.detailTextLabel.text = detail;
         cell.detailTextLabel.textColor = color;
+    }
+    return cell;
+}
+
+- (UITableViewCell *)proxyWhitelistCell {
+    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"ProxyWhitelistCell"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
+                                      reuseIdentifier:@"ProxyWhitelistCell"];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    }
+    NSString *raw = [tweakDefaults stringForKey:TWABKeyProxyWhitelist];
+    NSString *detail = raw.length ? raw : @"None";
+    if ([cell respondsToSelector:@selector(defaultContentConfiguration)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+        UIListContentConfiguration *cfg = [cell defaultContentConfiguration];
+        cfg.text = @"Skip Proxy for Channels";
+        cfg.secondaryText = detail;
+        cfg.secondaryTextProperties.color = [UIColor secondaryLabelColor];
+        [cell setContentConfiguration:cfg];
+#pragma clang diagnostic pop
+    } else {
+        cell.textLabel.text = @"Skip Proxy for Channels";
+        cell.detailTextLabel.text = detail;
+        cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
     }
     return cell;
 }
@@ -974,6 +1145,12 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     return [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 6 : 5;
 }
 
+// Section 4 row count. Base: 12 fixed rows (go ad-free through clip button).
+// When "Hide Community Highlights" is on, 6 extra rows appear (sub-toggles).
+- (NSInteger)declutterRowCount {
+    return [tweakDefaults boolForKey:TWABKeyHideCommunityHighlights] ? 18 : 12;
+}
+
 - (void)keepDeletedSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyKeepDeletedMessages];
     // Show / hide the Highlight Notes sub-setting under it.
@@ -1004,6 +1181,55 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 
 - (void)hideBitsSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideBits];
+}
+
+- (void)hideSubGoalSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideSubGoal];
+}
+
+- (void)hideCommunityHighlightsSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideCommunityHighlights];
+    if (sw.on) {
+        // When first enabled, turn on all 4 sub-toggles by default
+        if (![tweakDefaults objectForKey:TWABKeyHidePinnedMessages])
+            [tweakDefaults setBool:YES forKey:TWABKeyHidePinnedMessages];
+        if (![tweakDefaults objectForKey:TWABKeyHideHypeTrains])
+            [tweakDefaults setBool:YES forKey:TWABKeyHideHypeTrains];
+        if (![tweakDefaults objectForKey:TWABKeyHidePredictions])
+            [tweakDefaults setBool:YES forKey:TWABKeyHidePredictions];
+        if (![tweakDefaults objectForKey:TWABKeyHidePolls])
+            [tweakDefaults setBool:YES forKey:TWABKeyHidePolls];
+        if (![tweakDefaults objectForKey:TWABKeyHideSubGoal])
+            [tweakDefaults setBool:YES forKey:TWABKeyHideSubGoal];
+        if (![tweakDefaults objectForKey:TWABKeyHideDrops])
+            [tweakDefaults setBool:YES forKey:TWABKeyHideDrops];
+    }
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:4]
+                  withRowAnimation:UITableViewRowAnimationAutomatic];
+}
+
+- (void)hidePinnedMessagesSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHidePinnedMessages];
+}
+
+- (void)hideHypeTrainsSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideHypeTrains];
+}
+
+- (void)hidePredictionsSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHidePredictions];
+}
+
+- (void)hidePollsSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHidePolls];
+}
+
+- (void)hideDropsSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideDrops];
+}
+
+- (void)hideClipButtonSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyHideClipButton];
 }
 
 - (void)fitWideEmotesSwitchChanged:(UISwitch *)sw {
@@ -1053,7 +1279,13 @@ static NSArray<NSString *> *twab_exportKeys(void) {
               TWABKeyHideRecapsBar, TWABKeyFitWideEmotes, TWABKeyHideCreateTab,
               TWABKeyHideLeaderboard, TWABKeyHideSubscribe, TWABKeyHideBits,
               TWABKeyHideChannelBar, TWABKeyHideExtensions,
-              TWABKeyAutoClaimPoints ];
+              TWABKeyHideCommunityHighlights,
+              TWABKeyHidePinnedMessages, TWABKeyHideHypeTrains,
+              TWABKeyHidePredictions, TWABKeyHidePolls,
+              TWABKeyHideSubGoal, TWABKeyHideDrops,
+              TWABKeyDismissPinnedSeconds,
+              TWABKeyHideClipButton, TWABKeyAutoClaimPoints,
+              TWABKeyProxyWhitelist ];
 }
 
 - (void)reloadEmotesTapped:(UIView *)anchor {
@@ -1152,8 +1384,13 @@ static NSArray<NSString *> *twab_exportKeys(void) {
         [self presentImportResult:NO count:0];
         return;
     }
+    // Clear all known keys first so stale values from a prior install don't
+    // persist and conflict with the imported state (matches a fresh install).
+    NSArray *allKeys = twab_exportKeys();
+    for (NSString *key in allKeys)
+        [tweakDefaults removeObjectForKey:key];
     // Only apply keys we recognise — ignore anything else in the blob.
-    NSSet *allowed = [NSSet setWithArray:twab_exportKeys()];
+    NSSet *allowed = [NSSet setWithArray:allKeys];
     NSInteger n = 0;
     for (NSString *key in (NSDictionary *)values) {
         if (![allowed containsObject:key]) continue;
@@ -1264,6 +1501,32 @@ static NSArray<NSString *> *twab_exportKeys(void) {
         [self saveProxiesToDefaults];
     }
     if (self.proxyEnabled && self.customProxyEnabled) [self refreshProxyStatus];
+}
+
+- (void)presentWhitelistEditor {
+    NSString *current = [tweakDefaults stringForKey:TWABKeyProxyWhitelist] ?: @"";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Skip Proxy for Channels"
+        message:@"Enter channel names separated by commas. These channels won't use the ad-block proxy.\n\nChannels you're subscribed to already skip the proxy automatically."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = current;
+        tf.placeholder = @"channel1, channel2";
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *val = alert.textFields.firstObject.text ?: @"";
+        val = [val stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (val.length)
+            [tweakDefaults setObject:val forKey:TWABKeyProxyWhitelist];
+        else
+            [tweakDefaults removeObjectForKey:TWABKeyProxyWhitelist];
+        [weakSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
+                          withRowAnimation:UITableViewRowAnimationNone];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 @end

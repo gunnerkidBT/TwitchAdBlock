@@ -258,6 +258,70 @@ static void twab_denyStoryAccess(NSMutableDictionary *data, NSString *opName, BO
     }
 }
 
+// Community highlight GQL operations → setting key mapping.
+static NSString *twab_highlightSettingForOp(NSString *opName) {
+    if ([opName isEqualToString:@"GetPinnedChat"])
+        return TWABKeyHidePinnedMessages;
+    if ([opName isEqualToString:@"GetOngoingHypeTrain"])
+        return TWABKeyHideHypeTrains;
+    if ([opName isEqualToString:@"GetActivePrediction"])
+        return TWABKeyHidePredictions;
+    if ([opName isEqualToString:@"GetViewablePoll"])
+        return TWABKeyHidePolls;
+    if ([opName isEqualToString:@"GetActiveGoals"] ||
+        [opName isEqualToString:@"CommunityChallengeGoals"])
+        return TWABKeyHideSubGoal;
+    if ([opName isEqualToString:@"ChannelDropsCampaigns"] ||
+        [opName isEqualToString:@"DropChannelCampaignsProgress"])
+        return TWABKeyHideDrops;
+    return nil;
+}
+
+// Apollo container types whose cache records are shared across many queries.
+// We recurse into these (preserving __typename + id) so Apollo navigates to
+// the right record, and null the CONTENT fields (PredictionEvent, HypeTrain,
+// Poll, PinnedChatMessages, etc.) which are specific to these operations.
+static BOOL twab_isContainerTypename(NSString *typename) {
+    return [typename hasPrefix:@"User"] ||
+           [typename isEqualToString:@"Channel"] ||
+           [typename isEqualToString:@"Community"];
+}
+
+static void twab_deepNullify(NSMutableDictionary *dict, BOOL *dirty, int depth) {
+    if (depth > 8) return;
+    for (NSString *key in dict.allKeys) {
+        if ([key isEqualToString:@"__typename"] ||
+            [key isEqualToString:@"id"]) continue;
+        id val = dict[key];
+        if ([val isKindOfClass:NSMutableDictionary.class]) {
+            NSMutableDictionary *sub = val;
+            NSString *tn = sub[@"__typename"];
+            if ([tn isKindOfClass:NSString.class] && twab_isContainerTypename(tn)) {
+                twab_deepNullify(sub, dirty, depth + 1);
+            } else {
+                dict[key] = [NSNull null];
+                *dirty = YES;
+            }
+        } else if ([val isKindOfClass:NSArray.class] && [(NSArray *)val count]) {
+            dict[key] = [NSMutableArray array];
+            *dirty = YES;
+        } else if (val && val != (id)kCFNull &&
+                   ![val isKindOfClass:NSString.class] &&
+                   ![val isKindOfClass:NSNumber.class]) {
+            dict[key] = [NSNull null];
+            *dirty = YES;
+        }
+    }
+}
+
+static void twab_nullifyCommunityHighlight(NSMutableDictionary *data, NSString *opName, BOOL *dirty) {
+    if (![data isKindOfClass:NSMutableDictionary.class]) return;
+    BOOL wasDirty = *dirty;
+    twab_deepNullify(data, dirty, 0);
+    if (*dirty && !wasDirty)
+        os_log(OS_LOG_DEFAULT, "[TWAB-Hide] nullified %{public}@ community highlight", opName);
+}
+
 // Hide "Go Ad-Free", data side (31.x): React Native screens draw the button
 // from the TurboUpsellButton operation. Only its `offers` list is emptied.
 // Nulling subscriptionProduct itself overwrote a shared record (it also holds
@@ -457,7 +521,8 @@ id twab_stripPreloadFeedAds(id result, NSUInteger depth) {
     BOOL stripWatchLimit = adBlock && [tweakDefaults boolForKey:TWABKeyDisableWatchLimit];
     BOOL hideStories = [tweakDefaults boolForKey:TWABKeyHideStories];
     BOOL hideAdFree = [tweakDefaults boolForKey:TWABKeyHideAdFreeButton];
-    if (!adBlock && !hideStories && !hideAdFree) return self;
+    BOOL hideHighlights = [tweakDefaults boolForKey:TWABKeyHideCommunityHighlights];
+    if (!adBlock && !hideStories && !hideAdFree && !hideHighlights) return self;
     BOOL dirty = NO;
     NSArray *ops = [json isKindOfClass:NSMutableArray.class] ? json : @[json];
     for (NSUInteger i = 0; i < ops.count; i++) {
@@ -474,6 +539,13 @@ id twab_stripPreloadFeedAds(id result, NSUInteger depth) {
                 twab_emptyStoryShelf(op[@"data"], &dirty);
             if ([op[@"data"] isKindOfClass:NSMutableDictionary.class] && twab_isStoryAccessOperation(opName))
                 twab_denyStoryAccess(op[@"data"], opName, &dirty);
+        }
+        if (hideHighlights && opName) {
+            NSString *settingKey = twab_highlightSettingForOp(opName);
+            if (settingKey) {
+                if ([tweakDefaults boolForKey:settingKey] && [op[@"data"] isKindOfClass:NSMutableDictionary.class])
+                    twab_nullifyCommunityHighlight(op[@"data"], opName, &dirty);
+            }
         }
     }
     if (!dirty) return self;

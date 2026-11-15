@@ -23,6 +23,15 @@
         {
           "version": "31.9",
           "buildVersion": "263032151279117766",
+          "date": "2026-11-15T00:00:00Z",
+          "localizedDescription": "TwitchMods 0.1.21 for Twitch 31.9\n\n**Hide community highlights.** New master toggle to hide distracting overlays above chat — pinned messages, hype trains, predictions, polls, sub goals, and Twitch Drops notifications. Each has its own sub-toggle.\n\n**Skip proxy for specific channels.** List channels that don't need the ad-block proxy.\n\n**Hide clip button.** Remove the clip button from the video player.\n\n**Fixed:** Home launch screen options (Following, Live, Clips) work again on Twitch 31.9. Settings import no longer causes playback errors.",
+          "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.9-0.1.21/tv.twitch-31.9-TwitchAdBlock-0.1.21.ipa",
+          "size": 196569728,
+          "minOSVersion": "16.4"
+        },
+        {
+          "version": "31.9",
+          "buildVersion": "263032151279117766",
           "date": "2026-11-14T00:00:00Z",
           "localizedDescription": "TwitchMods 0.1.20 for Twitch 31.9\n\n**Fixed ad blocking (for real this time).** Twitch changed how they serve ads on their backend. The previous fix didn't fully cover it — this one does. Ad blocking should now work reliably again.",
           "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.9-0.1.20/tv.twitch-31.9-TwitchAdBlock-0.1.20.ipa",

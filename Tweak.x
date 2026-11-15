@@ -174,6 +174,7 @@ void twab_checkPlaylistForAds(NSData *data, NSURLRequest *request) {
   if (![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled]) return %orig;
   if (!twab_isMasterPlaylistHost(request.URL.host)) return %orig;
   if (twab_isExternalPlayback()) return %orig;  // Cast/AirPlay — send a clean URL
+  if (twab_channelIsWhitelisted(request.URL)) return %orig;
   // V2 URL rewrite only on this shadowed public hook (video traffic goes
   // through __NSURLSessionLocal in Emotes.x which has the richer routing
   // logic including CONNECT fallback + subscriber bypass). Try each
@@ -201,6 +202,7 @@ void twab_checkPlaylistForAds(NSData *data, NSURLRequest *request) {
   if (![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled]) return %orig;
   if (!twab_isMasterPlaylistHost(request.URL.host)) return %orig;
   if (twab_isExternalPlayback()) return %orig;  // Cast/AirPlay — send a clean URL
+  if (twab_channelIsWhitelisted(request.URL)) return %orig;
   for (NSString *proxyAddr in twab_effectiveProxyAddresses()) {
     NSURL *proxyURL = twab_normalizedProxyURL(proxyAddr);
     if (!proxyURL) continue;
@@ -237,7 +239,7 @@ void twab_checkPlaylistForAds(NSData *data, NSURLRequest *request) {
   // configured proxy until one rewrites successfully. AVURLAsset accepts
   // extra HTTP headers via the undocumented AVURLAssetHTTPHeaderFieldsKey
   // option — used here to inject Basic auth for proxies that need it.
-  if (twab_isMasterPlaylistHost(URL.host)) {
+  if (twab_isMasterPlaylistHost(URL.host) && !twab_channelIsWhitelisted(URL)) {
     for (NSString *proxyAddr in twab_effectiveProxyAddresses()) {
       NSURL *proxyURL = twab_normalizedProxyURL(proxyAddr);
       if (!proxyURL) continue;
@@ -593,18 +595,33 @@ static NSData *twab_filteredFeedData(id delegate, NSData *data, NSURLSessionData
       [delegate respondsToSelector:@selector(URLSession:task:didCompleteWithError:)])
     return twab_bufferEmoteChunk(data, dataTask);
   if (objc_getAssociatedObject(dataTask, &twab_emoteFlushingKey)) return data;
-  if ([delegate isKindOfClass:objc_getClass("RCTHTTPRequestHandler")] &&
-      [tweakDefaults boolForKey:TWABKeyHideLeaderboard] &&
-      twab_requestNamesOperation(dataTask.originalRequest, @"ChannelLeaderboards")) {
-    objc_setAssociatedObject(dataTask, &twab_wholeResponseHeldKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return twab_bufferEmoteChunk(data, dataTask);
+  if ([delegate isKindOfClass:objc_getClass("RCTHTTPRequestHandler")]) {
+    BOOL needHold = NO;
+    if ([tweakDefaults boolForKey:TWABKeyHideLeaderboard] &&
+        twab_requestNamesOperation(dataTask.originalRequest, @"ChannelLeaderboards"))
+      needHold = YES;
+    if (!needHold && [tweakDefaults boolForKey:TWABKeyHideCommunityHighlights] &&
+        (twab_requestNamesOperation(dataTask.originalRequest, @"GetPinnedChat") ||
+         twab_requestNamesOperation(dataTask.originalRequest, @"GetOngoingHypeTrain") ||
+         twab_requestNamesOperation(dataTask.originalRequest, @"GetActivePrediction") ||
+         twab_requestNamesOperation(dataTask.originalRequest, @"GetViewablePoll") ||
+         twab_requestNamesOperation(dataTask.originalRequest, @"GetActiveGoals") ||
+         twab_requestNamesOperation(dataTask.originalRequest, @"CommunityChallengeGoals") ||
+         twab_requestNamesOperation(dataTask.originalRequest, @"ChannelDropsCampaigns") ||
+         twab_requestNamesOperation(dataTask.originalRequest, @"DropChannelCampaignsProgress")))
+      needHold = YES;
+    if (needHold) {
+      objc_setAssociatedObject(dataTask, &twab_wholeResponseHeldKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+      return twab_bufferEmoteChunk(data, dataTask);
+    }
   }
   data = twab_rewriteWatchLimitBytes(data, dataTask.currentRequest, NSStringFromClass([delegate class]));
   // Ad-block (ad strip, watch limit) and Hide Stories (empties the Stories
   // shelf response) both filter here; each is gated inside on its own toggle.
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled] &&
       ![tweakDefaults boolForKey:TWABKeyHideStories] &&
-      ![tweakDefaults boolForKey:TWABKeyHideAdFreeButton]) return data;
+      ![tweakDefaults boolForKey:TWABKeyHideAdFreeButton] &&
+      ![tweakDefaults boolForKey:TWABKeyHideCommunityHighlights]) return data;
   return [data twab_responseDataForRequest:dataTask.currentRequest
                            hideTurboOffers:[delegate isKindOfClass:objc_getClass("RCTHTTPRequestHandler")]];
 }
@@ -810,6 +827,22 @@ static BOOL twab_shouldHideTestID(NSString *testID) {
     return [tweakDefaults boolForKey:TWABKeyHideExtensions];
   if ([testID isEqualToString:@"stage-inflow-metadata"])
     return [tweakDefaults boolForKey:TWABKeyHideChannelBar];
+  if ([testID isEqualToString:@"player-controls-clips"] ||
+      [testID isEqualToString:@"clip-reaction-button"] ||
+      [testID isEqualToString:@"theatre-clip-button-overlay-region"])
+    return [tweakDefaults boolForKey:TWABKeyHideClipButton];
+  return NO;
+}
+
+// Sub goal views are standalone banners above chat — hidden + removeFromSuperview
+// so they don't leave a white box.
+static BOOL twab_shouldRemoveTestID(NSString *testID) {
+  if ([testID hasPrefix:@"highlight-creator-goal"] ||
+      [testID hasPrefix:@"chat-sub-goal"] ||
+      [testID hasPrefix:@"creator-goal"] ||
+      [testID isEqualToString:@"community-goal-progress"])
+    return [tweakDefaults boolForKey:TWABKeyHideCommunityHighlights] &&
+           [tweakDefaults boolForKey:TWABKeyHideSubGoal];
   return NO;
 }
 
@@ -989,6 +1022,24 @@ static void twab_shiftFeedRows(UIView *shelf, CGFloat height) {
   }
 }
 
+// Community highlight auto-dismiss: log GQL operations to find data path.
+static char twab_pinnedDismissKey;
+
+static BOOL twab_isPinnedMessageTestID(NSString *testID) {
+  return [testID isEqualToString:@"highlight-pinned-chat"];
+}
+
+static void twab_schedulePinnedDismiss(UIView *view, NSString *testID) {
+  NSInteger seconds = [tweakDefaults integerForKey:TWABKeyDismissPinnedSeconds];
+  if (seconds <= 0) return;
+  static uint64_t dismissGeneration;
+  uint64_t gen = ++dismissGeneration;
+  NSNumber *genBox = @(gen);
+  objc_setAssociatedObject(view, &twab_pinnedDismissKey, genBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  os_log(OS_LOG_DEFAULT, "[TWAB-Highlight] scheduled dismiss in %lds for %{public}@",
+         (long)seconds, testID);
+}
+
 %hook RCTViewComponentView
 - (void)setAccessibilityIdentifier:(NSString *)identifier {
   %orig;
@@ -1000,7 +1051,19 @@ static void twab_shiftFeedRows(UIView *shelf, CGFloat height) {
     __weak UIView *weakNew = view;
     dispatch_async(dispatch_get_main_queue(), ^{ twab_collapseChannelBar(weakNew); });
   }
-  if (twab_shouldHideTestID(identifier)) {
+  if (twab_isPinnedMessageTestID(identifier)) {
+    twab_schedulePinnedDismiss(view, identifier);
+  }
+  if (twab_shouldRemoveTestID(identifier)) {
+    objc_setAssociatedObject(view, &twab_declutterHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    view.hidden = YES;
+    __weak UIView *weakView = view;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      UIView *v = weakView;
+      if (v) [v removeFromSuperview];
+    });
+    os_log(OS_LOG_DEFAULT, "[TWAB-Hide] removed %{public}@", identifier);
+  } else if (twab_shouldHideTestID(identifier)) {
     objc_setAssociatedObject(view, &twab_declutterHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     view.hidden = YES;
     os_log(OS_LOG_DEFAULT, "[TWAB-Hide] hid %{public}@", identifier);
@@ -1272,7 +1335,6 @@ static UIScrollView *twab_findPagedScrollView(UIView *root) {
 // Defined later in this file — scans all windows for the "Go Ad-Free" upsell.
 static void twab_handleAdFree(void);
 
-// Returns YES when the desired page is showing (or the user took over).
 static BOOL twab_applyHomeSubTab(id self, NSString *when) {
     static BOOL userSwiped = NO;
     static BOOL scrollStarted = NO;
@@ -1296,22 +1358,15 @@ static BOOL twab_applyHomeSubTab(id self, NSString *when) {
     CGFloat currentX = sv.contentOffset.x;
     if (fabs(currentX - desired) < 1.0) return YES;
 
-    os_log(OS_LOG_DEFAULT,
-        "[TWAB-Launch] sub-tab %{public}@: sub=%ld pageWidth=%.0f currentX=%.0f desired=%.0f contentSize=%{public}@",
-        when, (long)sub, pageWidth, currentX, desired, NSStringFromCGSize(sv.contentSize));
-
     scrollStarted = YES;
     [sv setContentOffset:CGPointMake(desired, 0) animated:YES];
     return YES;
 }
 
-%hook _TtC6Twitch30DiscoveryFeedTabViewController
-- (void)viewDidLayoutSubviews {
-    %orig;
+// Home sub-tab: hook both old and new class names for version compat.
+// 31.7-: DiscoveryFeedTabViewController; 31.9+: DiscoveryFeedRNContainerViewController.
+static void twab_homeSubTabLayout(id self) {
     twab_handleAdFree();
-    // Up to 5 layout passes (the first may be too early: zero bounds / one
-    // page), then timed re-checks over the first 3s in case Twitch's own
-    // initial-tab logic (31.x) switches the page after ours.
     static int attempts = 0;
     if (attempts >= 5) return;
     attempts++;
@@ -1327,6 +1382,19 @@ static BOOL twab_applyHomeSubTab(id self, NSString *when) {
             });
         }
     });
+}
+
+%hook _TtC6Twitch30DiscoveryFeedTabViewController
+- (void)viewDidLayoutSubviews {
+    %orig;
+    twab_homeSubTabLayout(self);
+}
+%end
+
+%hook _TtC6Twitch38DiscoveryFeedRNContainerViewController
+- (void)viewDidLayoutSubviews {
+    %orig;
+    twab_homeSubTabLayout(self);
 }
 %end
 
@@ -1710,6 +1778,7 @@ static void twab_checkClass(const char *name) {
   twab_checkClass("_TtC6Twitch16TabBarController");
   twab_checkClass("_TtC6Twitch20BrowseViewController");
   twab_checkClass("_TtC6Twitch30DiscoveryFeedTabViewController");
+  twab_checkClass("_TtC6Twitch38DiscoveryFeedRNContainerViewController");
   twab_checkClass("_TtC6Twitch41DiscoveryFeedShelfContainerViewController");
   // Evolve "Live" feed VC — not hooked today, but its presence confirms the
   // feed whose max-watchtime limit we neutralize and where feed display ads

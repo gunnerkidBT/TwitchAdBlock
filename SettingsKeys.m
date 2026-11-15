@@ -25,6 +25,16 @@ NSString *const TWABKeyHideSubscribe             = @"TWHideSubscribe";
 NSString *const TWABKeyHideBits                  = @"TWHideBits";
 NSString *const TWABKeyHideChannelBar            = @"TWHideChannelBar";
 NSString *const TWABKeyHideExtensions            = @"TWHideExtensions";
+NSString *const TWABKeyHideSubGoal               = @"TWHideSubGoal";
+NSString *const TWABKeyHideCommunityHighlights   = @"TWHideCommunityHighlights";
+NSString *const TWABKeyHidePinnedMessages        = @"TWHidePinnedMessages";
+NSString *const TWABKeyHideHypeTrains            = @"TWHideHypeTrains";
+NSString *const TWABKeyHidePredictions           = @"TWHidePredictions";
+NSString *const TWABKeyHidePolls                 = @"TWHidePolls";
+NSString *const TWABKeyHideDrops                 = @"TWHideDrops";
+NSString *const TWABKeyDismissPinnedSeconds      = @"TWDismissPinnedSeconds";
+NSString *const TWABKeyHideClipButton            = @"TWHideClipButton";
+NSString *const TWABKeyProxyWhitelist            = @"TWProxyWhitelist";
 
 NSString *twab_effectiveProxyAddress(void) {
     return [tweakDefaults boolForKey:TWABKeyAdBlockCustomProxyEnabled]
@@ -75,6 +85,22 @@ BOOL twab_userIsAdExempt(NSString *queryString) {
     BOOL turbo      = [dict[@"turbo"] respondsToSelector:@selector(boolValue)] &&
                       [dict[@"turbo"] boolValue];
     return subscriber || turbo;
+}
+
+BOOL twab_channelIsWhitelisted(NSURL *usherURL) {
+    NSString *raw = [tweakDefaults stringForKey:TWABKeyProxyWhitelist];
+    if (!raw.length) return NO;
+    NSArray *comps = usherURL.pathComponents;
+    // /api/channel/hls/<name>.m3u8 → pathComponents: ["/","api","channel","hls","<name>.m3u8"]
+    if (comps.count < 5) return NO;
+    NSString *channel = [comps[4] stringByDeletingPathExtension].lowercaseString;
+    if (!channel.length) return NO;
+    for (NSString *entry in [raw componentsSeparatedByString:@","]) {
+        NSString *trimmed = [entry stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]].lowercaseString;
+        if (trimmed.length && [trimmed isEqualToString:channel]) return YES;
+    }
+    return NO;
 }
 
 // XOR-obfuscated default proxy address. Plaintext is reconstructed once at
