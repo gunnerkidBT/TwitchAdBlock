@@ -23,9 +23,16 @@ player controls.
 **Fixed Home launch screen on Twitch 31.9.** The "Home → Following", "Home →
 Live", and "Home → Clips" options now work again on the latest Twitch version.
 
+**Fixed 7TV emotes from other channels showing in chat.** Emotes from a
+channel you previously visited no longer leak into other channels' chats.
+Only the current channel's emotes and globals are shown.
+
+**Fixed a video playback error with proxied streams.** Some streams could
+show "an error has occurred trying to play this content" when using the
+proxy. Fixed.
+
 **Fixed settings import.** Importing an old settings file no longer causes
-"an error has occurred trying to play this content" — stale settings are
-properly cleared first.
+playback errors — stale settings are properly cleared first.
 
 ---
 
