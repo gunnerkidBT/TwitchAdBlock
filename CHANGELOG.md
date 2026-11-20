@@ -5,6 +5,22 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.22 — November 20, 2026
+
+**Works with Twitch 32.1.** Updated to run on the latest Twitch app.
+
+**Blocked the "update Twitch" nag.** Twitch 32.x added a new update prompt that
+could pop up and interrupt you. It's now automatically dismissed.
+
+**Fixed Home launch screen on Twitch 32.x.** The "Home → Following", "Home →
+Live", and "Home → Clips" launch screen options now work correctly on Twitch 32
+and newer.
+
+**Fixed "Go Ad-Free" button hiding on Twitch 32.x.** The declutter toggle to
+hide the Go Ad-Free button works again on the latest Twitch version.
+
+---
+
 ## v0.1.21 — November 15, 2026
 
 **Hide community highlights.** New master toggle in Settings → Declutter that

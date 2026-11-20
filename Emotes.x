@@ -12,7 +12,13 @@
 //      where {N} is one of our synthetic IDs, rewrite the URL to the real
 //      7TV/BTTV/FFZ CDN.
 //
-//   3. Per-channel emote loading: when we first see a ROOMSTATE or PRIVMSG
+//   3. Hook KMPMCChatMessageTokenizer.tokenizeMessage…
+//      Post-process the token array: scan TextTokens for emote names and
+//      split them into EmoteTokens with our synthetic IDs. This makes the
+//      local echo (user's own messages) render third-party emotes
+//      immediately without waiting for the IRC server echo.
+//
+//   4. Per-channel emote loading: when we first see a ROOMSTATE or PRIVMSG
 //      with a new `room-id=`, kick off async fetches against the 7TV, BTTV,
 //      and FFZ public APIs. Globals are loaded once at startup. Per-channel
 //      sets are tracked in an LRU (capped at TWAB_MAX_ROOMS); when a room
@@ -23,13 +29,12 @@
 //   • Animated emotes render as a static first frame. Animation in this
 //     Twitch build is server-gated for the account; no client-side hook
 //     reaches the decision (verified via extensive ObjC swizzle attempts).
-//   • Local-user outgoing messages are tokenized locally and bypass the IRC
-//     echo, so your own emotes only render for OTHER viewers.
 //   • Sending works by typing the emote's name (it's plain chat text). The
 //     picker button in EmotePicker.x inserts names for you.
 
 #import "TWABProxyAuthDelegate.h"
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <os/log.h>
 #import <objc/runtime.h>
 #import <stdatomic.h>
@@ -113,6 +118,29 @@ static uint64_t twab_nextSyntheticId(void) {
     return atomic_fetch_add(&counter, 1);
 }
 
+static NSURL *twab_computeThumbCDNURL(NSString *provider, NSString *realId, BOOL animated);
+static void twab_setupTokenizerHook(void);
+
+
+static NSURLSession *twab_prefetchSession(void) {
+    static NSURLSession *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.networkServiceType = NSURLNetworkServiceTypeBackground;
+        cfg.HTTPMaximumConnectionsPerHost = 4;
+        s = [NSURLSession sessionWithConfiguration:cfg];
+    });
+    return s;
+}
+
+static void twab_prefetchThumb(NSString *provider, NSString *realId, BOOL animated) {
+    NSURL *url = twab_computeThumbCDNURL(provider, realId, animated);
+    if (!url) return;
+    [[twab_prefetchSession() dataTaskWithURL:url
+                           completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {}] resume];
+}
+
 // Register an emote word -> (provider, realId, animated, room). Allocates a
 // synthetic id and updates all indexes atomically. First write wins per
 // word; later writes with the same word are silently dropped, even from
@@ -144,6 +172,7 @@ static void twab_registerEmote(NSString *word, NSString *provider,
             twab_roomFakeIds()[roomKey] = set;
         }
         [set addObject:fakeId];
+        twab_prefetchThumb(provider, realId, animated);
     });
 }
 
@@ -484,12 +513,31 @@ static NSURL *twab_computeEmoteCDNURL(NSString *provider, NSString *realId, BOOL
     return nil;
 }
 
-// Thumbnail URL for the picker. Same variant chat uses: GIF for animated
-// emotes (EmotePicker.x decodes the frames), static otherwise.
+// Thumbnail CDN URL — 1x for the picker (cells are 36pt; 1x is sharp enough
+// and loads ~4× faster on congested CDNs like 7TV during big game launches).
+static NSURL *twab_computeThumbCDNURL(NSString *provider, NSString *realId, BOOL animated) {
+    if ([provider isEqualToString:@"7tv"]) {
+        NSString *ext = animated ? @"gif" : @"webp";
+        return [NSURL URLWithString:[NSString stringWithFormat:
+            @"https://cdn.7tv.app/emote/%@/1x.%@", realId, ext]];
+    }
+    if ([provider isEqualToString:@"bttv"])
+        return [NSURL URLWithString:[NSString stringWithFormat:
+            @"https://cdn.betterttv.net/emote/%@/1x", realId]];
+    if ([provider isEqualToString:@"ffz"]) {
+        if (animated)
+            return [NSURL URLWithString:[NSString stringWithFormat:
+                @"https://cdn.frankerfacez.com/emote/%@/animated/1.gif", realId]];
+        return [NSURL URLWithString:[NSString stringWithFormat:
+            @"https://cdn.frankerfacez.com/emote/%@/1", realId]];
+    }
+    return nil;
+}
+
 NSURL *twab_pickerImageURL(NSDictionary *emote) {
     NSNumber *animBox = emote[@"animated"];
     BOOL animated = [animBox isKindOfClass:NSNumber.class] && [animBox boolValue];
-    return twab_computeEmoteCDNURL(emote[@"provider"], emote[@"id"], animated);
+    return twab_computeThumbCDNURL(emote[@"provider"], emote[@"id"], animated);
 }
 
 static NSURL *twab_rewriteEmoteURL(NSURL *url) {
@@ -825,6 +873,7 @@ static NSString *twab_injectIRCEmotes(NSString *line) {
                    newVal,
                    [tagsPart substringFromIndex:valEnd]];
     }
+
     return [newTags stringByAppendingString:[line substringFromIndex:tagsEnd.location]];
 }
 
@@ -992,6 +1041,7 @@ static NSString *twab_rewriteIRCFrame(NSString *s, const char *path) {
         if (![loggedPaths containsObject:pathKey]) {
             [loggedPaths addObject:pathKey];
             os_log(OS_LOG_DEFAULT, "[TWAB-Chat] IRC frames arriving via %{public}s", path);
+            twab_setupTokenizerHook();
         }
     }
 
@@ -1082,6 +1132,166 @@ static twab_recvHandler twab_wrapHandler(twab_recvHandler h) {
 %end
 %end
 
+// ─── Tokenizer hook (local echo emotes) ─────────────────────────────────────
+// The KMP tokenizer creates the message token array for display. For the
+// user's own messages (local echo), only Twitch-native emotes appear in the
+// sortedEmoteRanges input. By post-processing the output, we split text
+// tokens that contain 7TV/BTTV/FFZ emote names into emote tokens with our
+// synthetic IDs, so the local echo renders third-party emotes immediately.
+// For other users' messages, the IRC-level injection already adds our emote
+// IDs to the emotes= tag, so those words are already EmoteTokens and the
+// post-processing is a no-op.
+
+static NSArray *twab_injectEmoteTokens(NSArray *tokens) {
+    static Class textTokenCls, emoteTokenCls;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        textTokenCls  = objc_getClass("KMPMCMessageTokenTextToken");
+        emoteTokenCls = objc_getClass("KMPMCMessageTokenEmoteToken");
+    });
+    if (!textTokenCls || !emoteTokenCls) return tokens;
+
+    NSMutableArray *result = nil;
+    NSString *room = twab_currentRoom;
+
+    for (NSUInteger i = 0; i < tokens.count; i++) {
+        id token = tokens[i];
+        if (![token isKindOfClass:textTokenCls]) {
+            if (result) [result addObject:token];
+            continue;
+        }
+
+        NSString *text = nil;
+        @try { text = [token performSelector:@selector(text)]; } @catch (id e) {}
+        if (!text.length) {
+            if (result) [result addObject:token];
+            continue;
+        }
+
+        // Quick scan: does any word match a third-party emote?
+        NSArray<NSString *> *words = [text componentsSeparatedByString:@" "];
+        BOOL hasEmote = NO;
+        for (NSString *w in words) {
+            if (!w.length) continue;
+            NSString *fid = room.length ? twab_fakeIdForWord_inRoom(w, room)
+                                        : twab_fakeIdForWord(w);
+            if (fid) { hasEmote = YES; break; }
+        }
+        if (!hasEmote) {
+            if (result) [result addObject:token];
+            continue;
+        }
+
+        // Lazy-init result array with everything before this token
+        if (!result) {
+            result = [NSMutableArray arrayWithCapacity:tokens.count + 8];
+            for (NSUInteger j = 0; j < i; j++)
+                [result addObject:tokens[j]];
+        }
+
+        // Extract flags from the original text token for new text tokens
+        id flags = nil;
+        @try { flags = [token valueForKey:@"flags"]; } @catch (id e) {}
+
+        // Build position list of emote matches
+        NSMutableArray *ranges = [NSMutableArray array];
+        NSUInteger pos = 0;
+        for (NSString *w in words) {
+            if (w.length) {
+                NSString *fid = room.length ? twab_fakeIdForWord_inRoom(w, room)
+                                            : twab_fakeIdForWord(w);
+                if (fid) {
+                    [ranges addObject:@{@"s": @(pos), @"e": @(pos + w.length),
+                                        @"fid": fid, @"w": w}];
+                }
+            }
+            pos += w.length + 1;
+        }
+
+        // Split the text token around matched emotes.
+        // Use objc_msgSend since these are KMP-generated classes without
+        // compile-time declarations.
+        SEL textInitSel  = @selector(initWithText:flags:);
+        SEL emoteInitSel = @selector(initWithText:id:);
+        NSUInteger cursor = 0;
+        for (NSDictionary *m in ranges) {
+            NSUInteger s = [m[@"s"] unsignedIntegerValue];
+            NSUInteger e = [m[@"e"] unsignedIntegerValue];
+            if (cursor < s) {
+                NSString *seg = [text substringWithRange:NSMakeRange(cursor, s - cursor)];
+                id t = ((id (*)(id, SEL, NSString *, id))objc_msgSend)(
+                    [textTokenCls alloc], textInitSel, seg, flags);
+                if (t) [result addObject:t];
+            }
+            id et = ((id (*)(id, SEL, NSString *, NSString *))objc_msgSend)(
+                [emoteTokenCls alloc], emoteInitSel, m[@"w"], m[@"fid"]);
+            if (et) [result addObject:et];
+            cursor = e;
+        }
+        if (cursor < text.length) {
+            NSString *seg = [text substringFromIndex:cursor];
+            id t = ((id (*)(id, SEL, NSString *, id))objc_msgSend)(
+                [textTokenCls alloc], textInitSel, seg, flags);
+            if (t) [result addObject:t];
+        }
+    }
+
+    return result ?: tokens;
+}
+
+// ─── Deferred tokenizer hook ────────────────────────────────────────────────
+//
+// KMPMCChatMessageTokenizer is a Kotlin/Native class — its ObjC methods are
+// registered by the KMP runtime AFTER our %ctor runs, so class_copyMethodList
+// returns 0 at init time. We defer the hook to the first IRC frame, by which
+// point KMP is fully initialized.
+
+static IMP twab_origTokenizerChar = NULL;
+static IMP twab_origTokenizerUtf  = NULL;
+
+static NSArray *twab_hookTokenizerChar(id self, SEL _cmd, NSString *message,
+                                        id emoteRanges, id gifRanges,
+                                        id bitsConfig, id options, id currentUser) {
+    NSArray *tokens = ((NSArray *(*)(id, SEL, NSString *, id, id, id, id, id))
+                       twab_origTokenizerChar)(self, _cmd, message, emoteRanges,
+                                               gifRanges, bitsConfig, options, currentUser);
+    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled]) return tokens;
+    NSArray *result = twab_injectEmoteTokens(tokens);
+    os_log(OS_LOG_DEFAULT, "[TWAB-Chat] tokenizerChar msg=\"%{public}@\" in=%lu out=%lu",
+           message, (unsigned long)tokens.count, (unsigned long)result.count);
+    return result;
+}
+
+static NSArray *twab_hookTokenizerUtf(id self, SEL _cmd, NSString *message,
+                                       id emoteRanges, id gifRanges,
+                                       id bitsConfig, id options, id currentUser) {
+    NSArray *tokens = ((NSArray *(*)(id, SEL, NSString *, id, id, id, id, id))
+                       twab_origTokenizerUtf)(self, _cmd, message, emoteRanges,
+                                              gifRanges, bitsConfig, options, currentUser);
+    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled]) return tokens;
+    NSArray *result = twab_injectEmoteTokens(tokens);
+    os_log(OS_LOG_DEFAULT, "[TWAB-Chat] tokenizerUtf msg=\"%{public}@\" in=%lu out=%lu",
+           message, (unsigned long)tokens.count, (unsigned long)result.count);
+    return result;
+}
+
+static void twab_setupTokenizerHook(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class cls = objc_getClass("KMPMCChatMessageTokenizer");
+        if (!cls) return;
+        SEL selC = @selector(tokenizeMessageWithCharacterRangesMessage:sortedEmoteRanges:sortedGifRanges:bitsConfig:options:currentUser:);
+        SEL selU = @selector(tokenizeMessageWithUtf8RangesMessage:sortedEmoteRanges:sortedGifRanges:bitsConfig:options:currentUser:);
+        Method mC = class_getInstanceMethod(cls, selC);
+        Method mU = class_getInstanceMethod(cls, selU);
+        if (mC) twab_origTokenizerChar = method_setImplementation(mC, (IMP)twab_hookTokenizerChar);
+        if (mU) twab_origTokenizerUtf  = method_setImplementation(mU, (IMP)twab_hookTokenizerUtf);
+        os_log(OS_LOG_DEFAULT, "[TWAB-Chat] deferred tokenizer hook char=%d utf=%d",
+               mC != NULL, mU != NULL);
+
+    });
+}
+
 static BOOL twab_classImplements(Class cls, SEL sel) {
     unsigned int n = 0;
     Method *methods = class_copyMethodList(cls, &n);
@@ -1104,9 +1314,8 @@ static BOOL twab_classImplements(Class cls, SEL sel) {
            : twab_classImplements(rnws, @selector(webSocket:didReceiveMessageWithString:)) ? "hooked (string)"
            : twab_classImplements(rnws, @selector(webSocket:didReceiveMessage:)) ? "hooked (any)"
            : "present but no receive method found");
-    // NB: defaults for TWABKeyEmotesEnabled / TWABKeyEmotePrefetchEnabled
-    // are set in Tweak.x's %ctor, NOT here — Logos doesn't guarantee
-    // inter-file ctor ordering and tweakDefaults may be nil at this
-    // point, making any setBool: silently fail.
+    // Tokenizer hook is deferred — see twab_setupTokenizerHook(), triggered
+    // on first IRC frame when KMP runtime has registered its ObjC methods.
+
     twab_loadGlobalEmotes();
 }

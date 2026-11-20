@@ -21,6 +21,15 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "32.1",
+          "buildVersion": "263171002292175769",
+          "date": "2026-11-20T00:00:00Z",
+          "localizedDescription": "TwitchMods 0.1.22 for Twitch 32.1\n\n**Works with Twitch 32.1.** Updated to run on the latest Twitch app.\n\n**Blocked the \"update Twitch\" nag.** Twitch 32.x added a new update prompt that could pop up and interrupt you. It's now automatically dismissed.\n\n**Fixed Home launch screen on Twitch 32.x.** The \"Home → Following\", \"Home → Live\", and \"Home → Clips\" launch screen options now work correctly on Twitch 32 and newer.\n\n**Fixed \"Go Ad-Free\" button hiding on Twitch 32.x.** The declutter toggle to hide the Go Ad-Free button works again on the latest Twitch version.",
+          "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v32.1-0.1.22/tv.twitch-32.1-TwitchAdBlock-0.1.22.ipa",
+          "size": 197446639,
+          "minOSVersion": "16.4"
+        },
+        {
           "version": "31.9",
           "buildVersion": "263032151279117766",
           "date": "2026-11-15T00:00:00Z",
@@ -144,11 +153,11 @@
           "NSUserTrackingUsageDescription": "Your iOS advertising ID and device data will be used to support creators and provide a personal ad experience."
         }
       },
-      "version": "31.9",
-      "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v31.9-0.1.20/tv.twitch-31.9-TwitchAdBlock-0.1.20.ipa",
-      "size": 196557264,
-      "versionDate": "2026-11-14T00:00:00Z",
-      "versionDescription": "TwitchMods 0.1.20 for Twitch 31.9\n\n**Fixed ad blocking (for real this time).** Twitch changed how they serve ads on their backend. The previous fix didn't fully cover it — this one does. Ad blocking should now work reliably again."
+      "version": "32.1",
+      "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v32.1-0.1.22/tv.twitch-32.1-TwitchAdBlock-0.1.22.ipa",
+      "size": 197446639,
+      "versionDate": "2026-11-20T00:00:00Z",
+      "versionDescription": "TwitchMods 0.1.22 for Twitch 32.1\n\n**Works with Twitch 32.1.** Updated to run on the latest Twitch app.\n\n**Blocked the \"update Twitch\" nag.** Twitch 32.x added a new update prompt that could pop up and interrupt you. It's now automatically dismissed.\n\n**Fixed Home launch screen on Twitch 32.x.** The launch screen options now work correctly on Twitch 32 and newer.\n\n**Fixed \"Go Ad-Free\" button hiding on Twitch 32.x.** The declutter toggle works again on the latest Twitch version."
     }
   ],
   "news": []

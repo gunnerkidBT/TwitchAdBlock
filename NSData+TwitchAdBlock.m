@@ -322,20 +322,6 @@ static void twab_nullifyCommunityHighlight(NSMutableDictionary *data, NSString *
         os_log(OS_LOG_DEFAULT, "[TWAB-Hide] nullified %{public}@ community highlight", opName);
 }
 
-// Hide "Go Ad-Free", data side (31.x): React Native screens draw the button
-// from the TurboUpsellButton operation. Only its `offers` list is emptied.
-// Nulling subscriptionProduct itself overwrote a shared record (it also holds
-// the viewer's own benefit) and removed the profile page's Stream Manager /
-// Analytics section, so the product stays intact.
-static void twab_emptyTurboOffers(NSMutableDictionary *data, BOOL *dirty) {
-    NSMutableDictionary *product = data[@"subscriptionProduct"];
-    if (![product isKindOfClass:NSMutableDictionary.class]) return;
-    NSArray *offers = product[@"offers"];
-    if (![offers isKindOfClass:NSArray.class] || !offers.count) return;
-    product[@"offers"] = [NSMutableArray array];
-    *dirty = YES;
-    os_log(OS_LOG_DEFAULT, "[TWAB-AdFree] emptied %lu Turbo offer(s) (Go Ad-Free button)", (unsigned long)offers.count);
-}
 
 // Operation name for a response element: Twitch echoes it in
 // extensions.operationName; fall back to the matching request op (batched
@@ -490,12 +476,6 @@ id twab_stripPreloadFeedAds(id result, NSUInteger depth) {
 }
 
 - (NSData *)twab_responseDataForRequest:(NSURLRequest *)request {
-    return [self twab_responseDataForRequest:request hideTurboOffers:NO];
-}
-
-// hideTurboOffers: only for React Native's copy of the response; native buttons
-// are hidden by the StandardButton hook.
-- (NSData *)twab_responseDataForRequest:(NSURLRequest *)request hideTurboOffers:(BOOL)hideTurboOffers {
     if (!request) return self;
     if (![request.URL.host isEqualToString:@"gql.twitch.tv"] ||
         ![request.URL.path isEqualToString:@"/gql"])
@@ -531,9 +511,11 @@ id twab_stripPreloadFeedAds(id result, NSUInteger depth) {
         NSString *opName = twab_responseOperationName(op, request, i);
         if (adBlock) twab_processTree(op[@"data"], arraySet, fieldSet, op[@"operationName"], &dirty);
         if (stripWatchLimit) twab_neutralizeWatchLimits(op[@"data"], &dirty);
-        if (hideAdFree && hideTurboOffers && [opName isEqualToString:@"TurboUpsellButton"] &&
-            [op[@"data"] isKindOfClass:NSMutableDictionary.class])
-            twab_emptyTurboOffers(op[@"data"], &dirty);
+        if (hideAdFree && [opName isEqualToString:@"TurboUpsellButton"] &&
+            [op[@"data"] isKindOfClass:NSMutableDictionary.class]) {
+            op[@"data"] = [NSMutableDictionary dictionary];
+            dirty = YES;
+        }
         if (hideStories) {
             if ([op[@"data"] isKindOfClass:NSMutableDictionary.class] && twab_isStoryShelfOperation(opName))
                 twab_emptyStoryShelf(op[@"data"], &dirty);

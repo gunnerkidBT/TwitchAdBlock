@@ -551,7 +551,7 @@ static BOOL twab_completeHeldEmote(id delegate, NSURLSession *session, NSURLSess
   if (objc_getAssociatedObject(task, &twab_wholeResponseHeldKey)) {
     NSData *edited = [buf twab_dataHidingLeaderboardsForRequest:task.originalRequest];
     edited = twab_rewriteWatchLimitBytes(edited, task.currentRequest, NSStringFromClass([delegate class]));
-    edited = [edited twab_responseDataForRequest:task.currentRequest hideTurboOffers:YES];
+    edited = [edited twab_responseDataForRequest:task.currentRequest];
     twab_deliverEmote(delegate, session, task, edited);
     complete();
     return YES;
@@ -622,8 +622,7 @@ static NSData *twab_filteredFeedData(id delegate, NSData *data, NSURLSessionData
       ![tweakDefaults boolForKey:TWABKeyHideStories] &&
       ![tweakDefaults boolForKey:TWABKeyHideAdFreeButton] &&
       ![tweakDefaults boolForKey:TWABKeyHideCommunityHighlights]) return data;
-  return [data twab_responseDataForRequest:dataTask.currentRequest
-                           hideTurboOffers:[delegate isKindOfClass:objc_getClass("RCTHTTPRequestHandler")]];
+  return [data twab_responseDataForRequest:dataTask.currentRequest];
 }
 
 // Keep Live Feed Playing — the native feed prefetch (31.x). The React Native
@@ -831,6 +830,8 @@ static BOOL twab_shouldHideTestID(NSString *testID) {
       [testID isEqualToString:@"clip-reaction-button"] ||
       [testID isEqualToString:@"theatre-clip-button-overlay-region"])
     return [tweakDefaults boolForKey:TWABKeyHideClipButton];
+  if ([testID isEqualToString:@"following-turbo-upsell"])
+    return [tweakDefaults boolForKey:TWABKeyHideAdFreeButton];
   return NO;
 }
 
@@ -1196,10 +1197,17 @@ static void twab_clearFollowingAds(id self) {
 }
 %end
 
-// Block update prompt
+// Block update prompt (TWAppUpdatePrompt on ≤31.x, Swift VC on 32.x+)
 
 %hook TWAppUpdatePrompt
 + (void)startMonitoringSavantSettingsToShowPromptIfNeeded {
+}
+%end
+
+%hook _TtC6Twitch29AppUpdatePromptViewController
+- (void)viewDidLoad {
+  %orig;
+  [(UIViewController *)self dismissViewControllerAnimated:NO completion:nil];
 }
 %end
 
@@ -1337,13 +1345,12 @@ static void twab_handleAdFree(void);
 
 static BOOL twab_applyHomeSubTab(id self, NSString *when) {
     static BOOL userSwiped = NO;
-    static BOOL scrollStarted = NO;
-    if (userSwiped) return YES;
+    static BOOL applied = NO;
+    if (userSwiped || applied) return YES;
     if (![tweakDefaults objectForKey:TWABKeyLaunchSubTab]) return YES;
     if ([tweakDefaults integerForKey:TWABKeyLaunchTab] != 0) return YES;
     NSInteger sub = [tweakDefaults integerForKey:TWABKeyLaunchSubTab];
     if (sub < 0) return YES;
-    if (scrollStarted) return YES;
 
     UIView *view = ((UIViewController *)self).view;
     UIScrollView *sv = twab_findPagedScrollView(view);
@@ -1358,8 +1365,36 @@ static BOOL twab_applyHomeSubTab(id self, NSString *when) {
     CGFloat currentX = sv.contentOffset.x;
     if (fabs(currentX - desired) < 1.0) return YES;
 
-    scrollStarted = YES;
-    [sv setContentOffset:CGPointMake(desired, 0) animated:YES];
+    applied = YES;
+    SEL sel = @selector(selectViewControllerAtIndex:animated:);
+    if ([self respondsToSelector:sel]) {
+        os_log(OS_LOG_DEFAULT, "[TWAB-Launch] homeSubTab via selectVC:%ld at %{public}@", (long)sub, when);
+        ((void (*)(id, SEL, NSInteger, BOOL))objc_msgSend)(self, sel, sub, YES);
+    } else {
+        // RN Fabric (32.x+): wire delegate and simulate a full swipe sequence
+        // so RN updates its internal page state and touch responders.
+        UIView *wrapper = sv.superview;
+        if (!sv.delegate && [wrapper conformsToProtocol:@protocol(UIScrollViewDelegate)])
+            sv.delegate = (id<UIScrollViewDelegate>)wrapper;
+        id<UIScrollViewDelegate> d = sv.delegate;
+        os_log(OS_LOG_DEFAULT, "[TWAB-Launch] homeSubTab via simulated swipe at %{public}@", when);
+        CGPoint dest = CGPointMake(desired, 0);
+        if (d && [d respondsToSelector:@selector(scrollViewWillBeginDragging:)])
+            [d scrollViewWillBeginDragging:sv];
+        [sv setContentOffset:dest animated:NO];
+        if (d) {
+            if ([d respondsToSelector:@selector(scrollViewDidScroll:)])
+                [d scrollViewDidScroll:sv];
+            if ([d respondsToSelector:@selector(scrollViewWillEndDragging:withVelocity:targetContentOffset:)]) {
+                CGPoint t = dest;
+                [d scrollViewWillEndDragging:sv withVelocity:CGPointZero targetContentOffset:&t];
+            }
+            if ([d respondsToSelector:@selector(scrollViewDidEndDragging:willDecelerate:)])
+                [d scrollViewDidEndDragging:sv willDecelerate:YES];
+            if ([d respondsToSelector:@selector(scrollViewDidEndDecelerating:)])
+                [d scrollViewDidEndDecelerating:sv];
+        }
+    }
     return YES;
 }
 
@@ -1775,6 +1810,7 @@ static void twab_checkClass(const char *name) {
   twab_checkClass("_TtC6Twitch23FollowingViewController");
   twab_checkClass("_TtC6Twitch27HeadlinerFollowingAdManager");
   twab_checkClass("TWAppUpdatePrompt");
+  twab_checkClass("_TtC6Twitch29AppUpdatePromptViewController");
   twab_checkClass("_TtC6Twitch16TabBarController");
   twab_checkClass("_TtC6Twitch20BrowseViewController");
   twab_checkClass("_TtC6Twitch30DiscoveryFeedTabViewController");
