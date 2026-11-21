@@ -361,6 +361,11 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                              on:[tweakDefaults boolForKey:TWABKeyHighlightDeletedNotes]
                                          action:@selector(highlightDeletedSwitchChanged:)
                                      identifier:@"HighlightDeletedSwitch"];
+            {
+                NSInteger emoteRow = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 5 : 4;
+                if (indexPath.row == emoteRow)
+                    return [self emoteSizeCell];
+            }
             return [self actionCellWithTitle:LOC(@"settings.emotes.reload", @"Reload Emotes")
                                     subtitle:LOC(@"settings.emotes.reload.desc",
                                                  @"Clear the cache and re-fetch all emote sets.")
@@ -781,6 +786,9 @@ static const NSInteger kProxyTextFieldTag = 0xABCD;
     return cell;
 }
 
+// Slider row: title + value% on top, subtitle below, slider at the bottom.
+// Built entirely with manual subviews — UIListContentConfiguration takes over
+// the content view and hides anything else added to it.
 // Tappable action row (no switch) with a tinted/red title + gray subtitle.
 - (UITableViewCell *)actionCellWithTitle:(NSString *)title
                                 subtitle:(NSString *)subtitle
@@ -1047,18 +1055,30 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
     if (section == 6) {
+        UIView *wrap = [[UIView alloc] init];
+
+        UIButton *kofi = [UIButton buttonWithType:UIButtonTypeSystem];
+        [kofi setTitle:@"☕ Support the Developer" forState:UIControlStateNormal];
+        kofi.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        [kofi setTitleColor:[UIColor colorWithRed:1.0 green:0.6 blue:0.2 alpha:1.0] forState:UIControlStateNormal];
+        [kofi addTarget:self action:@selector(openKofi) forControlEvents:UIControlEventTouchUpInside];
+        kofi.translatesAutoresizingMaskIntoConstraints = NO;
+
         UILabel *ver = [[UILabel alloc] init];
         ver.text = @"TwitchMods v" PACKAGE_VERSION;
         ver.textAlignment = NSTextAlignmentCenter;
         ver.font = [UIFont systemFontOfSize:13];
         ver.textColor = [UIColor colorWithWhite:0.5 alpha:1];
-        UIView *wrap = [[UIView alloc] init];
-        [wrap addSubview:ver];
         ver.translatesAutoresizingMaskIntoConstraints = NO;
+
+        [wrap addSubview:kofi];
+        [wrap addSubview:ver];
         [NSLayoutConstraint activateConstraints:@[
+            [kofi.topAnchor constraintEqualToAnchor:wrap.topAnchor constant:12],
+            [kofi.centerXAnchor constraintEqualToAnchor:wrap.centerXAnchor],
+            [ver.topAnchor constraintEqualToAnchor:kofi.bottomAnchor constant:6],
             [ver.leadingAnchor constraintEqualToAnchor:wrap.leadingAnchor constant:16],
             [ver.trailingAnchor constraintEqualToAnchor:wrap.trailingAnchor constant:-16],
-            [ver.topAnchor constraintEqualToAnchor:wrap.topAnchor constant:8],
             [ver.bottomAnchor constraintEqualToAnchor:wrap.bottomAnchor constant:-8],
         ]];
         return wrap;
@@ -1111,6 +1131,10 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 // fixed height. Toggles, action rows, and the launch dropdown all self-size.
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 1 && indexPath.row >= 2) return 44.0;
+    if (indexPath.section == 2) {
+        NSInteger emoteRow = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 5 : 4;
+        if (indexPath.row == emoteRow) return 70.0;
+    }
     return UITableViewAutomaticDimension;
 }
 
@@ -1142,7 +1166,8 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 // keep deleted messages, [highlight notes — only while keep deleted messages
 // is on], reload emotes (always last).
 - (NSInteger)chatRowCount {
-    return [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 6 : 5;
+    NSInteger base = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 6 : 5;
+    return base + 1; // emote size selector
 }
 
 // Section 4 row count. Base: 12 fixed rows (go ad-free through clip button).
@@ -1264,6 +1289,39 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideAdFreeButton];
 }
 
+- (UITableViewCell *)emoteSizeCell {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                                   reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+    UILabel *title = [UILabel new];
+    title.text = @"Emote Size";
+    title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Default", @"Large", @"Extra Large"]];
+    NSInteger idx = [tweakDefaults integerForKey:TWABKeyChatEmoteScale];
+    if (idx < 0 || idx > 2) idx = 0;
+    seg.selectedSegmentIndex = idx;
+    [seg addTarget:self action:@selector(emoteSizeChanged:) forControlEvents:UIControlEventValueChanged];
+    seg.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [cell.contentView addSubview:title];
+    [cell.contentView addSubview:seg];
+    [NSLayoutConstraint activateConstraints:@[
+        [title.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [title.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+        [seg.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [seg.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [seg.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:8],
+    ]];
+    return cell;
+}
+
+- (void)emoteSizeChanged:(UISegmentedControl *)seg {
+    [tweakDefaults setInteger:seg.selectedSegmentIndex forKey:TWABKeyChatEmoteScale];
+}
+
 #pragma mark - Tools (reload / export / import / diagnostics)
 
 // The subset of defaults keys that export/import round-trips. Proxy list,
@@ -1285,7 +1343,13 @@ static NSArray<NSString *> *twab_exportKeys(void) {
               TWABKeyHideSubGoal, TWABKeyHideDrops,
               TWABKeyDismissPinnedSeconds,
               TWABKeyHideClipButton, TWABKeyAutoClaimPoints,
-              TWABKeyProxyWhitelist ];
+              TWABKeyProxyWhitelist,
+              TWABKeyChatEmoteScale ];
+}
+
+- (void)openKofi {
+    [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://ko-fi.com/gunnerkidgt"]
+                                       options:@{} completionHandler:nil];
 }
 
 - (void)reloadEmotesTapped:(UIView *)anchor {

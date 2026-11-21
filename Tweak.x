@@ -1041,6 +1041,24 @@ static void twab_schedulePinnedDismiss(UIView *view, NSString *testID) {
          (long)seconds, testID);
 }
 
+// ─── Emote scaling ───────────────────────────────────────────────────────────
+// Stored as integer index: 0 = Default (1.0x), 1 = Large (1.15x), 2 = Extra Large (1.3x).
+static CGFloat twab_emoteScale(void) {
+  NSInteger idx = [tweakDefaults integerForKey:TWABKeyChatEmoteScale];
+  if (idx == 1) return 1.15;
+  if (idx == 2) return 1.3;
+  return 1.0;
+}
+
+static BOOL twab_isInsideChatMessageList(UIView *view) {
+  for (UIView *v = view.superview; v; v = v.superview) {
+    NSString *aid = v.accessibilityIdentifier;
+    if ([aid isEqualToString:@"chat-message-list"]) return YES;
+    if ([aid isEqualToString:@"theatre-portrait-layout"]) return NO;
+  }
+  return NO;
+}
+
 %hook RCTViewComponentView
 - (void)setAccessibilityIdentifier:(NSString *)identifier {
   %orig;
@@ -1128,6 +1146,42 @@ static void twab_schedulePinnedDismiss(UIView *view, NSString *testID) {
 // Hide Channel Bar: drags in the space above the message list still scroll it.
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
   return %orig || twab_pointInExtendedTop((UIView *)self, point);
+}
+%end
+
+// ─── Emote scaling ──────────────────────────────────────────────────────────
+// RCTImageComponentView emote scaling. Only scale images larger than badge
+// size (~18pt) so subscriber/VIP/mod badges stay at their normal size.
+static void twab_scaleEmoteIfNeeded(UIView *view) {
+  if (!view.window) return;
+  CGFloat scale = twab_emoteScale();
+  if (fabs(scale - 1.0) < 0.01) {
+    view.transform = CGAffineTransformIdentity;
+    return;
+  }
+  CGSize sz = view.bounds.size;
+  if (sz.width < 20 || sz.height < 20) return;
+  if (!twab_isInsideChatMessageList(view)) return;
+  view.transform = CGAffineTransformMakeScale(scale, scale);
+  for (UIView *p = view.superview; p; p = p.superview) {
+    if (p.clipsToBounds) p.clipsToBounds = NO;
+    NSString *aid = p.accessibilityIdentifier;
+    if ([aid isEqualToString:@"chat-message-list"]) break;
+  }
+}
+
+%hook RCTImageComponentView
+- (void)didMoveToWindow {
+  %orig;
+  twab_scaleEmoteIfNeeded((UIView *)self);
+}
+- (void)updateLayoutMetrics:(const void *)layoutMetrics oldLayoutMetrics:(const void *)oldLayoutMetrics {
+  %orig;
+  twab_scaleEmoteIfNeeded((UIView *)self);
+}
+- (void)prepareForRecycle {
+  ((UIView *)self).transform = CGAffineTransformIdentity;
+  %orig;
 }
 %end
 

@@ -22,6 +22,15 @@
       "versions": [
         {
           "version": "32.1",
+          "buildVersion": "263171002292175770",
+          "date": "2026-11-21T00:00:00Z",
+          "localizedDescription": "TwitchMods 0.1.23 for Twitch 32.1\n\n**Emote Size setting.** New option in Settings → Chat to make emotes bigger. Choose between Default, Large, and Extra Large.\n\n**Improved proxy reliability.** Switched to a more reliable proxy server so ad-blocking stays working. If you'd like to help keep the proxy server running, there's a new \"Support the Developer\" tip button at the bottom of Settings.\n\n**Fixed Emote Size cell appearance.** The Emote Size selector now matches the rest of the settings in both light and dark mode.",
+          "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v32.1-0.1.23/tv.twitch-32.1-TwitchAdBlock-0.1.23.ipa",
+          "size": 197450367,
+          "minOSVersion": "16.4"
+        },
+        {
+          "version": "32.1",
           "buildVersion": "263171002292175769",
           "date": "2026-11-20T00:00:00Z",
           "localizedDescription": "TwitchMods 0.1.22 for Twitch 32.1\n\n**Works with Twitch 32.1.** Updated to run on the latest Twitch app.\n\n**Blocked the \"update Twitch\" nag.** Twitch 32.x added a new update prompt that could pop up and interrupt you. It's now automatically dismissed.\n\n**Fixed Home launch screen on Twitch 32.x.** The \"Home → Following\", \"Home → Live\", and \"Home → Clips\" launch screen options now work correctly on Twitch 32 and newer.\n\n**Fixed \"Go Ad-Free\" button hiding on Twitch 32.x.** The declutter toggle to hide the Go Ad-Free button works again on the latest Twitch version.",
@@ -154,10 +163,10 @@
         }
       },
       "version": "32.1",
-      "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v32.1-0.1.22/tv.twitch-32.1-TwitchAdBlock-0.1.22.ipa",
-      "size": 197446639,
-      "versionDate": "2026-11-20T00:00:00Z",
-      "versionDescription": "TwitchMods 0.1.22 for Twitch 32.1\n\n**Works with Twitch 32.1.** Updated to run on the latest Twitch app.\n\n**Blocked the \"update Twitch\" nag.** Twitch 32.x added a new update prompt that could pop up and interrupt you. It's now automatically dismissed.\n\n**Fixed Home launch screen on Twitch 32.x.** The launch screen options now work correctly on Twitch 32 and newer.\n\n**Fixed \"Go Ad-Free\" button hiding on Twitch 32.x.** The declutter toggle works again on the latest Twitch version."
+      "downloadURL": "https://github.com/gunnerkidBT/TwitchAdBlock/releases/download/v32.1-0.1.23/tv.twitch-32.1-TwitchAdBlock-0.1.23.ipa",
+      "size": 197450367,
+      "versionDate": "2026-11-21T00:00:00Z",
+      "versionDescription": "TwitchMods 0.1.23 for Twitch 32.1\n\n**Emote Size setting.** New option in Settings → Chat to make emotes bigger. Choose between Default, Large, and Extra Large.\n\n**Improved proxy reliability.** Switched to a more reliable proxy server so ad-blocking stays working. If you'd like to help keep the proxy server running, there's a new \"Support the Developer\" tip button at the bottom of Settings.\n\n**Fixed Emote Size cell appearance.** The Emote Size selector now matches the rest of the settings in both light and dark mode."
     }
   ],
   "news": []

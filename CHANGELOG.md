@@ -5,6 +5,20 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.23 — November 21, 2026
+
+**Emote Size setting.** New option in Settings → Chat to make emotes bigger.
+Choose between Default, Large, and Extra Large.
+
+**Improved proxy reliability.** Switched to a more reliable proxy server so
+ad-blocking stays working. If you'd like to help keep the proxy server running,
+there's a new "Support the Developer" tip button at the bottom of Settings.
+
+**Fixed Emote Size cell appearance.** The Emote Size selector now matches the
+rest of the settings in both light and dark mode.
+
+---
+
 ## v0.1.22 — November 20, 2026
 
 **Works with Twitch 32.1.** Updated to run on the latest Twitch app.

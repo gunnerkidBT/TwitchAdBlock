@@ -35,6 +35,7 @@ NSString *const TWABKeyHideDrops                 = @"TWHideDrops";
 NSString *const TWABKeyDismissPinnedSeconds      = @"TWDismissPinnedSeconds";
 NSString *const TWABKeyHideClipButton            = @"TWHideClipButton";
 NSString *const TWABKeyProxyWhitelist            = @"TWProxyWhitelist";
+NSString *const TWABKeyChatEmoteScale            = @"TWChatEmoteScale";
 
 NSString *twab_effectiveProxyAddress(void) {
     return [tweakDefaults boolForKey:TWABKeyAdBlockCustomProxyEnabled]
@@ -108,10 +109,11 @@ BOOL twab_channelIsWhitelisted(NSURL *usherURL) {
 // `strings` against the dylib.
 NSString *twab_defaultProxyAddress(void) {
     static const uint8_t key = 0xA5;
-    // 2.58.33.241:8888 (tinyproxy on AlphaVPS Sofia, Bulgaria)
     static const uint8_t bytes[] = {
-        0x97, 0x8b, 0x90, 0x9d, 0x8b, 0x96, 0x96, 0x8b, 0x97, 0x91,
-        0x94, 0x9f, 0x9d, 0x9d, 0x9d, 0x9d,
+        0xEE, 0xC2, 0x9C, 0x95, 0xEE, 0xC6, 0x9F, 0xE0, 0xCB, 0x91,
+        0xC4, 0xF1, 0x95, 0xE5, 0x91, 0x90, 0x8B, 0x9D, 0x94, 0x8B,
+        0x92, 0x93, 0x8B, 0x97, 0x97, 0x92, 0x9F, 0x9D, 0x95, 0x95,
+        0x95,
     };
     static NSString *cached;
     static dispatch_once_t once;
