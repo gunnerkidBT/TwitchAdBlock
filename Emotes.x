@@ -35,6 +35,7 @@
 #import "TWABProxyAuthDelegate.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <ImageIO/ImageIO.h>
 #import <os/log.h>
 #import <objc/runtime.h>
 #import <stdatomic.h>
@@ -49,7 +50,8 @@
 extern BOOL twab_isAdHost(NSString *host);
 extern BOOL twab_isPlaylistHost(NSString *host);
 extern BOOL twab_isMasterPlaylistHost(NSString *host);
-extern BOOL twab_isExternalPlayback(void);  // Cast/AirPlay — skip proxy rewrite
+extern BOOL twab_isExternalPlayback(void);
+extern void twab_emoteNetStart(NSURL *url);  // Tweak.x diagnostics  // Cast/AirPlay — skip proxy rewrite
 
 extern NSUserDefaults *tweakDefaults;
 
@@ -59,6 +61,7 @@ extern NSUserDefaults *tweakDefaults;
 // always < 10 digits (~hundreds of millions) so no collision risk.
 
 static NSString *const TWAB_GLOBAL_ROOM = @"__global__";
+static NSString *twab_currentRoom;  // room-id of the latest ROOMSTATE
 static const NSUInteger TWAB_MAX_ROOMS = 50;
 
 static dispatch_queue_t twab_emoteQueue(void) {
@@ -76,6 +79,12 @@ static NSMutableDictionary<NSString *, NSDictionary *> *twab_byWord(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{ m = [NSMutableDictionary dictionary]; });
     return m;
+}
+
+// Words are per room: different channels can use the same name for
+// different emotes.
+static NSString *twab_wordKey(NSString *roomKey, NSString *word) {
+    return [NSString stringWithFormat:@"%@%@", roomKey, word];
 }
 
 static NSMutableDictionary<NSString *, NSDictionary *> *twab_byFakeId(void) {
@@ -110,16 +119,36 @@ static NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *twab_roomFak
     return m;
 }
 
-// Monotonically increasing synthetic ID generator. Starts at 9_000_000_000 so
-// it never collides with real Twitch numeric IDs (which top out around
-// 3 billion as of 2025) or with v2 ids (which contain underscores).
-static uint64_t twab_nextSyntheticId(void) {
-    static _Atomic uint64_t counter = 9000000000;
-    return atomic_fetch_add(&counter, 1);
+// Synthetic ID for an emote, derived from provider + real id so it's the
+// same every launch: Twitch caches emote images by URL, so a stable ID lets
+// that cache work across restarts (and never shows a stale image for a
+// reused ID). Range [9_000_000_000, 9_999_999_998] stays clear of real Twitch
+// emote IDs. Caller holds the emote queue's barrier.
+static NSString *twab_stableFakeIdLocked(NSString *provider, NSString *realId) {
+    NSString *key = [NSString stringWithFormat:@"%@/%@", provider, realId];
+    uint64_t h = 1469598103934665603ULL;
+    for (const char *c = key.UTF8String; *c; c++) { h ^= (uint8_t)*c; h *= 1099511628211ULL; }
+    uint64_t n = 9000000000ULL + h % 999999999ULL;
+    for (;;) {
+        NSString *fakeId = [NSString stringWithFormat:@"%llu", n];
+        NSDictionary *e = twab_byFakeId()[fakeId];
+        if (!e || ([e[@"provider"] isEqualToString:provider] && [e[@"id"] isEqualToString:realId]))
+            return fakeId;
+        n = n >= 9999999998ULL ? 9000000000ULL : n + 1;
+    }
 }
 
 static NSURL *twab_computeThumbCDNURL(NSString *provider, NSString *realId, BOOL animated);
 static void twab_setupTokenizerHook(void);
+static NSDictionary *twab_entryForFakeId(NSString *fakeId);
+static void twab_loadChannelEmotes(NSString *roomId);
+static void twab_noteSentChatRequest(NSURLRequest *request);
+static void twab_registerEmote(NSString *word, NSString *provider,
+                               NSString *realId, NSString *room,
+                               BOOL animated, CGFloat ratio);
+static void twab_registerEmoteLocked(NSString *word, NSString *provider,
+                                     NSString *realId, NSString *roomKey,
+                                     BOOL animated, CGFloat ratio);
 
 
 static NSURLSession *twab_prefetchSession(void) {
@@ -134,11 +163,172 @@ static NSURLSession *twab_prefetchSession(void) {
     return s;
 }
 
+static NSURLSession *twab_emoteAPISession(void) {
+    static NSURLSession *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.timeoutIntervalForResource = 5;
+        cfg.timeoutIntervalForRequest = 5;
+        s = [NSURLSession sessionWithConfiguration:cfg];
+    });
+    return s;
+}
+
+// ─── Disk cache ────────────────────────────────────────────────────────────
+//
+// Emote sets are cached to Library/Caches/TwitchAdBlock/emotes/ as plist
+// files keyed by room ID (or "__global__"). Each file contains an array of
+// dicts: {word, provider, id, animated}. On channel join the cache is loaded
+// synchronously (< 10ms for typical sets) so emotes are available before the
+// first PRIVMSG arrives. API fetches update the cache in the background.
+
+static NSString *twab_emoteCacheDir(void) {
+    static NSString *dir;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *caches = NSSearchPathForDirectoriesInDomains(
+            NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+        dir = [caches stringByAppendingPathComponent:@"TwitchAdBlock/emotes"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil error:nil];
+    });
+    return dir;
+}
+
+static NSString *twab_emoteCachePath(NSString *roomKey) {
+    NSString *safe = [roomKey stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+    return [twab_emoteCacheDir() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"%@.plist", safe]];
+}
+
+static void twab_saveEmotesToDisk(NSString *roomKey, NSArray<NSDictionary *> *emotes) {
+    if (!emotes.count) return;
+    NSString *path = twab_emoteCachePath(roomKey);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        [emotes writeToFile:path atomically:YES];
+    });
+}
+
+static NSArray<NSDictionary *> *twab_loadEmotesFromDisk(NSString *roomKey) {
+    NSString *path = twab_emoteCachePath(roomKey);
+    NSArray *arr = [NSArray arrayWithContentsOfFile:path];
+    if (![arr isKindOfClass:NSArray.class]) return nil;
+    return arr;
+}
+
+// Register a provider's cached emotes for `roomKey` (a room id or
+// TWAB_GLOBAL_ROOM). Caller holds the emote queue's barrier, so the emotes
+// are in place before any later chat message is matched.
+static void twab_registerCachedEmotesLocked(NSString *roomKey, NSString *provider) {
+    NSString *fileKey = [NSString stringWithFormat:@"%@_%@", roomKey, provider];
+    NSArray<NSDictionary *> *cached = twab_loadEmotesFromDisk(fileKey);
+    if (!cached.count) return;
+    NSUInteger n = 0;
+    for (NSDictionary *e in cached) {
+        if (![e isKindOfClass:NSDictionary.class]) continue;
+        NSString *word = e[@"word"];
+        NSString *prov = e[@"provider"];
+        NSString *realId = e[@"id"];
+        if (word.length && prov.length && realId.length) {
+            twab_registerEmoteLocked(word, prov, realId, roomKey,
+                                     [e[@"animated"] boolValue], [e[@"ratio"] doubleValue]);
+            n++;
+        }
+    }
+    os_log(OS_LOG_DEFAULT, "[TWAB-Emote] cache loaded +%lu %{public}@",
+           (unsigned long)n, fileKey);
+}
+
+// ─── Emote aspect ratios ───────────────────────────────────────────────────
+//
+// Width/height of each third-party emote, keyed "provider/id", learned from
+// the prefetched thumbnail and persisted so it's known before the first
+// message arrives. Wide emotes get a wider slot in the chat line.
+
+extern CGFloat twab_emoteAspectForURL(NSURL *url);
+
+static NSString *twab_ratioPath(void) {
+    return [[twab_emoteCacheDir() stringByDeletingLastPathComponent]
+            stringByAppendingPathComponent:@"emote_ratios.plist"];
+}
+
+static NSMutableDictionary<NSString *, NSNumber *> *twab_ratioStore(void) {
+    static NSMutableDictionary *m;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSDictionary *disk = [NSDictionary dictionaryWithContentsOfFile:twab_ratioPath()];
+        m = [disk isKindOfClass:NSDictionary.class] ? [disk mutableCopy] : [NSMutableDictionary dictionary];
+    });
+    return m;
+}
+
+static void twab_setRatio(NSString *key, CGFloat ratio) {
+    static BOOL saveScheduled;
+    NSMutableDictionary *store = twab_ratioStore();
+    @synchronized (store) {
+        NSNumber *old = store[key];
+        if (old && fabs(old.doubleValue - ratio) < 0.01) return;
+        store[key] = @(ratio);
+        if (saveScheduled) return;
+        saveScheduled = YES;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSDictionary *snapshot;
+        @synchronized (store) { snapshot = [store copy]; saveScheduled = NO; }
+        [snapshot writeToFile:twab_ratioPath() atomically:YES];
+    });
+}
+
+static BOOL twab_hasRatio(NSString *key) {
+    NSMutableDictionary *store = twab_ratioStore();
+    @synchronized (store) { return store[key] != nil; }
+}
+
+// Width/height from API-provided dimensions, or 0 if missing.
+static CGFloat twab_ratioFromDims(id w, id h) {
+    if (![w isKindOfClass:NSNumber.class] || ![h isKindOfClass:NSNumber.class]) return 0;
+    double hv = [h doubleValue];
+    return hv > 0 ? [w doubleValue] / hv : 0;
+}
+
+static CGFloat twab_imageDataAspect(NSData *data) {
+    if (!data.length) return 0;
+    CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+    if (!src) return 0;
+    NSDictionary *props = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(src, 0, NULL));
+    CFRelease(src);
+    double w = [props[(id)kCGImagePropertyPixelWidth] doubleValue];
+    double h = [props[(id)kCGImagePropertyPixelHeight] doubleValue];
+    return (w > 0 && h > 0) ? w / h : 0;
+}
+
+// Ratio rounded to quarters (what the chat slot uses), or 0 if the emote
+// isn't one of ours, isn't known yet, or isn't wide.
+CGFloat twab_wideRatioForEmoteId(NSString *fakeId) {
+    if (!fakeId.length) return 0;
+    NSDictionary *entry = twab_entryForFakeId(fakeId);
+    if (!entry) return 0;
+    NSString *key = [NSString stringWithFormat:@"%@/%@", entry[@"provider"], entry[@"id"]];
+    NSMutableDictionary *store = twab_ratioStore();
+    double r;
+    @synchronized (store) { r = [store[key] doubleValue]; }
+    double q = round(fmin(r, 6.0) * 4.0) / 4.0;
+    return q >= 1.25 ? q : 0;
+}
+
 static void twab_prefetchThumb(NSString *provider, NSString *realId, BOOL animated) {
     NSURL *url = twab_computeThumbCDNURL(provider, realId, animated);
     if (!url) return;
     [[twab_prefetchSession() dataTaskWithURL:url
-                           completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {}] resume];
+                           completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        CGFloat ratio = twab_emoteAspectForURL(url);
+        if (ratio <= 0) ratio = twab_imageDataAspect(d);
+        if (ratio > 0)
+            twab_setRatio([NSString stringWithFormat:@"%@/%@", provider, realId], ratio);
+    }] resume];
 }
 
 // Register an emote word -> (provider, realId, animated, room). Allocates a
@@ -149,15 +339,14 @@ static void twab_prefetchThumb(NSString *provider, NSString *realId, BOOL animat
 // animated emotes need .gif on 7TV (only GIF carries animation in the
 // renderer); static emotes need .webp (some 7TV emotes lack a GIF
 // variant entirely and .gif would 404).
-static void twab_registerEmote(NSString *word, NSString *provider,
-                               NSString *realId, NSString *room,
-                               BOOL animated) {
-    if (!word.length || !provider.length || !realId.length) return;
-    NSString *roomKey = room.length ? room : TWAB_GLOBAL_ROOM;
-    dispatch_barrier_async(twab_emoteQueue(), ^{
-        if (twab_byWord()[word]) return;
-        NSString *fakeId = [NSString stringWithFormat:@"%llu", twab_nextSyntheticId()];
-        twab_byWord()[word] = @{@"provider": provider,
+// Caller holds the emote queue's barrier.
+static void twab_registerEmoteLocked(NSString *word, NSString *provider,
+                                     NSString *realId, NSString *roomKey,
+                                     BOOL animated, CGFloat ratio) {
+        NSString *wordKey = twab_wordKey(roomKey, word);
+        if (twab_byWord()[wordKey]) return;
+        NSString *fakeId = twab_stableFakeIdLocked(provider, realId);
+        twab_byWord()[wordKey] = @{@"provider": provider,
                                 @"id": realId,
                                 @"fake": fakeId,
                                 @"animated": @(animated)};
@@ -172,7 +361,18 @@ static void twab_registerEmote(NSString *word, NSString *provider,
             twab_roomFakeIds()[roomKey] = set;
         }
         [set addObject:fakeId];
-        twab_prefetchThumb(provider, realId, animated);
+        NSString *ratioKey = [NSString stringWithFormat:@"%@/%@", provider, realId];
+        if (ratio > 0) twab_setRatio(ratioKey, ratio);
+        else if (!twab_hasRatio(ratioKey)) twab_prefetchThumb(provider, realId, animated);
+}
+
+static void twab_registerEmote(NSString *word, NSString *provider,
+                               NSString *realId, NSString *room,
+                               BOOL animated, CGFloat ratio) {
+    if (!word.length || !provider.length || !realId.length) return;
+    NSString *roomKey = room.length ? room : TWAB_GLOBAL_ROOM;
+    dispatch_barrier_async(twab_emoteQueue(), ^{
+        twab_registerEmoteLocked(word, provider, realId, roomKey, animated, ratio);
     });
 }
 
@@ -186,42 +386,35 @@ static void twab_evictOldestRoomsLocked(void) {
         [lru removeObjectAtIndex:0];
         [twab_loadedRooms() removeObject:evicted];
         NSSet *fakeIds = [twab_roomFakeIds()[evicted] copy];
-        for (NSString *fakeId in fakeIds) {
-            NSDictionary *entry = twab_byFakeId()[fakeId];
-            NSString *word = entry[@"word"];
-            if (word) [twab_byWord() removeObjectForKey:word];
-            [twab_byFakeId() removeObjectForKey:fakeId];
-        }
         [twab_roomFakeIds() removeObjectForKey:evicted];
+        NSString *prefix = twab_wordKey(evicted, @"");
+        for (NSString *k in twab_byWord().allKeys)
+            if ([k hasPrefix:prefix]) [twab_byWord() removeObjectForKey:k];
+        // IDs are shared between rooms that use the same emote.
+        NSMutableSet *stillUsed = [NSMutableSet set];
+        for (NSSet *set in twab_roomFakeIds().allValues) [stillUsed unionSet:set];
+        for (NSString *fakeId in fakeIds)
+            if (![stillUsed containsObject:fakeId]) [twab_byFakeId() removeObjectForKey:fakeId];
         os_log(OS_LOG_DEFAULT,
                "[TWAB-Emote] evicted room=%{public}@ emotes=%lu",
                evicted, (unsigned long)fakeIds.count);
     }
 }
 
-static NSString *twab_fakeIdForWord(NSString *word) {
+// The channel's own emote wins over a global one with the same name.
+static NSString *twab_fakeIdForWord_inRoom(NSString *word, NSString *roomId) {
+    if (!word.length) return nil;
     __block NSString *result = nil;
     dispatch_sync(twab_emoteQueue(), ^{
-        NSDictionary *e = twab_byWord()[word];
-        result = e ? e[@"fake"] : nil;
+        NSDictionary *e = roomId.length ? twab_byWord()[twab_wordKey(roomId, word)] : nil;
+        if (!e) e = twab_byWord()[twab_wordKey(TWAB_GLOBAL_ROOM, word)];
+        result = e[@"fake"];
     });
     return result;
 }
 
-static NSString *twab_fakeIdForWord_inRoom(NSString *word, NSString *roomId) {
-    __block NSString *result = nil;
-    dispatch_sync(twab_emoteQueue(), ^{
-        NSDictionary *e = twab_byWord()[word];
-        if (!e) return;
-        NSString *fakeId = e[@"fake"];
-        NSDictionary *full = twab_byFakeId()[fakeId];
-        if (!full) return;
-        NSString *emoteRoom = full[@"room"];
-        if ([emoteRoom isEqualToString:TWAB_GLOBAL_ROOM] ||
-            [emoteRoom isEqualToString:roomId])
-            result = fakeId;
-    });
-    return result;
+static NSString *twab_fakeIdForWord(NSString *word) {
+    return twab_fakeIdForWord_inRoom(word, twab_currentRoom);
 }
 
 static NSDictionary *twab_entryForFakeId(NSString *fakeId) {
@@ -239,7 +432,6 @@ static NSDictionary *twab_entryForFakeId(NSString *fakeId) {
 // ROOMSTATE — Twitch sends one on every JOIN, so it tracks channel switches.
 // Mutated only under the emote queue's barrier.
 
-static NSString *twab_currentRoom;
 
 // Snapshot of the emotes for the current channel + globals, for the picker.
 // Each entry: word, provider, id, animated, channel (BOOL — NO for globals).
@@ -255,7 +447,7 @@ NSArray<NSDictionary *> *twab_pickerEmotes(void) {
         for (NSString *fakeId in ids) {
             NSDictionary *e = twab_byFakeId()[fakeId];
             if (!e) continue;
-            BOOL isChannel = room && [e[@"room"] isEqualToString:room];
+            BOOL isChannel = room && [twab_roomFakeIds()[room] containsObject:fakeId];
             NSDictionary *out = @{@"word": e[@"word"],
                                   @"provider": e[@"provider"],
                                   @"id": e[@"id"],
@@ -266,9 +458,161 @@ NSArray<NSDictionary *> *twab_pickerEmotes(void) {
     });
     NSSortDescriptor *byWord = [NSSortDescriptor sortDescriptorWithKey:@"word"
         ascending:YES selector:@selector(caseInsensitiveCompare:)];
+    NSSet *channelWords = [NSSet setWithArray:[channel valueForKey:@"word"]];
+    [global filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *e, id b) {
+        return ![channelWords containsObject:e[@"word"]];
+    }]];
     [channel sortUsingDescriptors:@[byWord]];
     [global sortUsingDescriptors:@[byWord]];
     return [channel arrayByAddingObjectsFromArray:global];
+}
+
+// ─── Twitch emote list ──────────────────────────────────────────────────────
+//
+// Twitch's chat builds the copy of your own sent message, and its emote
+// picker, from the ChatEmoteSets GQL response (your available Twitch emote
+// sets). Appending our emotes there as two extra sets (this channel's, and
+// globals) makes sent messages show them and lists them in Twitch's picker.
+// Our synthetic IDs go through the usual URL rewrite for images.
+
+static NSString *twab_gqlChannelIDForOperation(NSURLRequest *request, NSString *operation, NSInteger *index) {
+    if (!request.HTTPBody) return nil;
+    id body = [NSJSONSerialization JSONObjectWithData:request.HTTPBody options:0 error:nil];
+    NSArray *ops = [body isKindOfClass:NSArray.class] ? body : (body ? @[body] : @[]);
+    for (NSInteger i = 0; i < (NSInteger)ops.count; i++) {
+        NSDictionary *op = ops[i];
+        if (![op isKindOfClass:NSDictionary.class] || ![op[@"operationName"] isEqual:operation]) continue;
+        NSDictionary *vars = op[@"variables"];
+        if (![vars isKindOfClass:NSDictionary.class]) return nil;
+        id cid = vars[@"channelID"];
+        if ([cid isKindOfClass:NSNumber.class]) cid = [cid stringValue];
+        if (![cid isKindOfClass:NSString.class]) return nil;
+        if (index) *index = [body isKindOfClass:NSArray.class] ? i : -1;
+        return cid;
+    }
+    return nil;
+}
+
+// Words for `roomKey`: [{word, fake, animated}], sorted case-insensitively.
+static NSArray<NSDictionary *> *twab_emotesForRoomLocked(NSString *roomKey) {
+    NSString *prefix = twab_wordKey(roomKey, @"");
+    NSMutableArray *out = [NSMutableArray array];
+    [twab_byWord() enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSDictionary *e, BOOL *stop) {
+        if (![k hasPrefix:prefix]) return;
+        [out addObject:@{@"word": [k substringFromIndex:prefix.length],
+                         @"fake": e[@"fake"], @"animated": e[@"animated"] ?: @NO}];
+    }];
+    [out sortUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"word" ascending:YES
+                                    selector:@selector(caseInsensitiveCompare:)]]];
+    return out;
+}
+
+static NSMutableDictionary *twab_emoteSetFor(NSArray<NSDictionary *> *emotes, NSString *setID,
+                                             NSDictionary *emoteTemplate, NSDictionary *setTemplate,
+                                             NSDictionary *owner) {
+    NSMutableArray *list = [NSMutableArray arrayWithCapacity:emotes.count];
+    for (NSDictionary *e in emotes) {
+        NSMutableDictionary *em = emoteTemplate ? [emoteTemplate mutableCopy] : [NSMutableDictionary dictionary];
+        em[@"id"] = e[@"fake"];
+        em[@"setID"] = setID;
+        em[@"token"] = e[@"word"];
+        em[@"type"] = @"GLOBALS";
+        em[@"assetType"] = [e[@"animated"] boolValue] ? @"ANIMATED" : @"STATIC";
+        em[@"modifiers"] = @[];
+        [list addObject:em];
+    }
+    NSMutableDictionary *set = setTemplate ? [setTemplate mutableCopy] : [NSMutableDictionary dictionary];
+    set[@"id"] = setID;
+    set[@"emotes"] = list;
+    set[@"owner"] = owner ?: (id)[NSNull null];
+    return set;
+}
+
+NSData *twab_injectChatEmoteSets(NSData *data, NSURLRequest *request) {
+    if (!data.length || ![tweakDefaults boolForKey:TWABKeyEmotesEnabled]) return data;
+    NSInteger index = -1;
+    NSString *room = twab_gqlChannelIDForOperation(request, @"ChatEmoteSets", &index);
+    if (!room.length) return data;
+    id json = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil];
+    NSMutableDictionary *resp = nil;
+    if ([json isKindOfClass:NSArray.class]) {
+        if (index >= 0 && index < (NSInteger)[json count]) resp = json[index];
+    } else {
+        resp = json;
+    }
+    if (![resp isKindOfClass:NSMutableDictionary.class]) {
+        os_log(OS_LOG_DEFAULT, "[TWAB-Sent] emote list not edited: response isn't JSON (index %ld)", (long)index);
+        return data;
+    }
+    id dataObj = resp[@"data"];
+    id channelObj = [dataObj isKindOfClass:NSDictionary.class] ? dataObj[@"channel"] : nil;
+    NSMutableDictionary *selfObj = [channelObj isKindOfClass:NSDictionary.class] ? channelObj[@"self"] : nil;
+    if (![selfObj isKindOfClass:NSMutableDictionary.class]) {
+        os_log(OS_LOG_DEFAULT, "[TWAB-Sent] emote list not edited: no channel.self in response");
+        return data;
+    }
+    NSMutableArray *sets = selfObj[@"availableEmoteSets"];
+    if (![sets isKindOfClass:NSMutableArray.class]) {
+        sets = [NSMutableArray array];
+        selfObj[@"availableEmoteSets"] = sets;
+    }
+
+    // Make sure the channel's cached emotes are registered before reading.
+    twab_loadChannelEmotes(room);
+    __block NSArray *channel, *global;
+    dispatch_sync(twab_emoteQueue(), ^{
+        channel = twab_emotesForRoomLocked(room);
+        global = twab_emotesForRoomLocked(TWAB_GLOBAL_ROOM);
+    });
+    if (!channel.count && !global.count) {
+        os_log(OS_LOG_DEFAULT, "[TWAB-Sent] emote list not edited: no 3rd-party emotes registered yet");
+        return data;
+    }
+    NSSet *channelWords = [NSSet setWithArray:[channel valueForKey:@"word"]];
+    global = [global filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *e, id b) {
+        return ![channelWords containsObject:e[@"word"]];
+    }]];
+
+    // Copy the shape (including __typename) of Twitch's own entries.
+    NSDictionary *setTemplate = nil, *emoteTemplate = nil, *ownerTemplate = nil;
+    NSString *avatar = nil;
+    for (NSDictionary *set in sets) {
+        if (![set isKindOfClass:NSDictionary.class]) continue;
+        if (!setTemplate) setTemplate = set;
+        NSArray *ems = set[@"emotes"];
+        if (!emoteTemplate && [ems isKindOfClass:NSArray.class] && [ems.firstObject isKindOfClass:NSDictionary.class])
+            emoteTemplate = ems.firstObject;
+        NSDictionary *own = set[@"owner"];
+        if ([own isKindOfClass:NSDictionary.class]) {
+            if (!ownerTemplate) ownerTemplate = own;
+            if ([own[@"id"] isEqual:room] && [own[@"profileImageURL"] isKindOfClass:NSString.class])
+                avatar = own[@"profileImageURL"];
+        }
+    }
+    if (!avatar) avatar = [ownerTemplate[@"profileImageURL"] isKindOfClass:NSString.class] ? ownerTemplate[@"profileImageURL"] : @"";
+    NSMutableDictionary *(^makeOwner)(NSString *, NSString *, NSString *) = ^NSMutableDictionary *(NSString *oid, NSString *login, NSString *name) {
+        NSMutableDictionary *o = ownerTemplate ? [ownerTemplate mutableCopy] : [NSMutableDictionary dictionary];
+        o[@"id"] = oid;
+        o[@"login"] = login;
+        o[@"displayName"] = name;
+        o[@"profileImageURL"] = avatar;
+        return o;
+    };
+    if (channel.count)
+        [sets addObject:twab_emoteSetFor(channel, [NSString stringWithFormat:@"twab-channel-%@", room],
+                                         emoteTemplate, setTemplate,
+                                         makeOwner(@"9000000000", @"twab_channel", @"7TV / BTTV / FFZ Channel"))];
+    if (global.count)
+        [sets addObject:twab_emoteSetFor(global, @"twab-global", emoteTemplate, setTemplate,
+                                         makeOwner(@"9000000001", @"twab_global", @"7TV / BTTV / FFZ Global"))];
+    NSData *out = [NSJSONSerialization dataWithJSONObject:json options:0 error:nil];
+    if (!out) {
+        os_log(OS_LOG_DEFAULT, "[TWAB-Sent] emote list not edited: couldn't re-encode");
+        return data;
+    }
+    os_log(OS_LOG_DEFAULT, "[TWAB-Sent] added %lu channel + %lu global emotes to Twitch's emote list room=%{public}@",
+           (unsigned long)channel.count, (unsigned long)global.count, room);
+    return out;
 }
 
 // ─── Emote loaders ──────────────────────────────────────────────────────────
@@ -279,7 +623,7 @@ NSArray<NSDictionary *> *twab_pickerEmotes(void) {
 // crashing the chat thread.
 
 static void twab_load7TVSet(NSString *url, NSString *room) {
-    [[NSURLSession.sharedSession dataTaskWithURL:[NSURL URLWithString:url]
+    [[twab_emoteAPISession() dataTaskWithURL:[NSURL URLWithString:url]
                               completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
         if (e || !d) {
             os_log_error(OS_LOG_DEFAULT, "[TWAB-Emote] 7TV fetch failed url=%{public}@ err=%{public}@",
@@ -292,26 +636,36 @@ static void twab_load7TVSet(NSString *url, NSString *room) {
         if (![set isKindOfClass:NSDictionary.class]) set = j;
         id emotes = set[@"emotes"];
         if (![emotes isKindOfClass:NSArray.class]) return;
+        NSString *roomKey = room.length ? room : TWAB_GLOBAL_ROOM;
+        NSMutableArray *cacheEntries = [NSMutableArray array];
         NSUInteger n = 0;
         for (id em in emotes) {
             if (![em isKindOfClass:NSDictionary.class]) continue;
             NSString *name = em[@"name"];
             NSString *eid = em[@"id"];
-            // animated flag lives at em.data.animated (7TV v3). Falls
-            // back to NO if missing — safer to under-animate than to
-            // request a non-existent .gif and render blank.
             BOOL animated = NO;
+            CGFloat ratio = 0;
             id data = em[@"data"];
             if ([data isKindOfClass:NSDictionary.class]) {
                 id a = ((NSDictionary *)data)[@"animated"];
                 if ([a isKindOfClass:NSNumber.class]) animated = [a boolValue];
+                id host = ((NSDictionary *)data)[@"host"];
+                id files = [host isKindOfClass:NSDictionary.class] ? ((NSDictionary *)host)[@"files"] : nil;
+                id f0 = [files isKindOfClass:NSArray.class] ? [(NSArray *)files firstObject] : nil;
+                if ([f0 isKindOfClass:NSDictionary.class])
+                    ratio = twab_ratioFromDims(f0[@"width"], f0[@"height"]);
             }
             if ([name isKindOfClass:NSString.class] && name.length &&
                 [eid isKindOfClass:NSString.class] && eid.length) {
-                twab_registerEmote(name, @"7tv", eid, room, animated);
+                twab_registerEmote(name, @"7tv", eid, room, animated, ratio);
+                [cacheEntries addObject:@{@"word": name, @"provider": @"7tv",
+                                          @"id": eid, @"animated": @(animated),
+                                          @"ratio": @(ratio)}];
                 n++;
             }
         }
+        if (cacheEntries.count)
+            twab_saveEmotesToDisk([NSString stringWithFormat:@"%@_7tv", roomKey], cacheEntries);
         os_log(OS_LOG_DEFAULT, "[TWAB-Emote] 7TV +%lu %{public}@", (unsigned long)n, url);
     }] resume];
 }
@@ -320,7 +674,7 @@ static void twab_loadBTTVChannel(NSString *roomId) {
     if (!roomId.length) return;
     NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:
         @"https://api.betterttv.net/3/cached/users/twitch/%@", roomId]];
-    [[NSURLSession.sharedSession dataTaskWithURL:url
+    [[twab_emoteAPISession() dataTaskWithURL:url
                               completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
         if (e || !d) {
             os_log_error(OS_LOG_DEFAULT, "[TWAB-Emote] BTTV channel fetch failed room=%{public}@ err=%{public}@",
@@ -329,6 +683,7 @@ static void twab_loadBTTVChannel(NSString *roomId) {
         }
         id j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
         if (![j isKindOfClass:NSDictionary.class]) return;
+        NSMutableArray *cacheEntries = [NSMutableArray array];
         NSUInteger n = 0;
         for (NSString *key in @[ @"channelEmotes", @"sharedEmotes" ]) {
             id arr = j[key];
@@ -337,17 +692,22 @@ static void twab_loadBTTVChannel(NSString *roomId) {
                 if (![em isKindOfClass:NSDictionary.class]) continue;
                 NSString *code = em[@"code"];
                 NSString *eid = em[@"id"];
-                // BTTV: imageType == "gif" → animated; "png" → static.
                 NSString *imgType = em[@"imageType"];
                 BOOL animated = [imgType isKindOfClass:NSString.class] &&
                                 [imgType isEqualToString:@"gif"];
                 if ([code isKindOfClass:NSString.class] && code.length &&
                     [eid isKindOfClass:NSString.class] && eid.length) {
-                    twab_registerEmote(code, @"bttv", eid, roomId, animated);
+                    CGFloat ratio = twab_ratioFromDims(em[@"width"], em[@"height"]);
+                    twab_registerEmote(code, @"bttv", eid, roomId, animated, ratio);
+                    [cacheEntries addObject:@{@"word": code, @"provider": @"bttv",
+                                              @"id": eid, @"animated": @(animated),
+                                              @"ratio": @(ratio)}];
                     n++;
                 }
             }
         }
+        if (cacheEntries.count)
+            twab_saveEmotesToDisk([NSString stringWithFormat:@"%@_bttv", roomId], cacheEntries);
         os_log(OS_LOG_DEFAULT, "[TWAB-Emote] BTTV channel +%lu room=%{public}@",
                (unsigned long)n, roomId);
     }] resume];
@@ -355,7 +715,7 @@ static void twab_loadBTTVChannel(NSString *roomId) {
 
 static void twab_loadBTTVGlobal(void) {
     NSURL *url = [NSURL URLWithString:@"https://api.betterttv.net/3/cached/emotes/global"];
-    [[NSURLSession.sharedSession dataTaskWithURL:url
+    [[twab_emoteAPISession() dataTaskWithURL:url
                               completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
         if (e || !d) {
             os_log_error(OS_LOG_DEFAULT, "[TWAB-Emote] BTTV global fetch failed err=%{public}@",
@@ -364,6 +724,7 @@ static void twab_loadBTTVGlobal(void) {
         }
         id list = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
         if (![list isKindOfClass:NSArray.class]) return;
+        NSMutableArray *cacheEntries = [NSMutableArray array];
         NSUInteger n = 0;
         for (id em in list) {
             if (![em isKindOfClass:NSDictionary.class]) continue;
@@ -374,16 +735,22 @@ static void twab_loadBTTVGlobal(void) {
                             [imgType isEqualToString:@"gif"];
             if ([code isKindOfClass:NSString.class] && code.length &&
                 [eid isKindOfClass:NSString.class] && eid.length) {
-                twab_registerEmote(code, @"bttv", eid, nil, animated);
+                CGFloat ratio = twab_ratioFromDims(em[@"width"], em[@"height"]);
+                twab_registerEmote(code, @"bttv", eid, nil, animated, ratio);
+                [cacheEntries addObject:@{@"word": code, @"provider": @"bttv",
+                                          @"id": eid, @"animated": @(animated),
+                                          @"ratio": @(ratio)}];
                 n++;
             }
         }
+        if (cacheEntries.count)
+            twab_saveEmotesToDisk(@"__global___bttv", cacheEntries);
         os_log(OS_LOG_DEFAULT, "[TWAB-Emote] BTTV global +%lu", (unsigned long)n);
     }] resume];
 }
 
 static void twab_loadFFZSet(NSString *url, NSString *room) {
-    [[NSURLSession.sharedSession dataTaskWithURL:[NSURL URLWithString:url]
+    [[twab_emoteAPISession() dataTaskWithURL:[NSURL URLWithString:url]
                               completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
         if (e || !d) {
             os_log_error(OS_LOG_DEFAULT, "[TWAB-Emote] FFZ fetch failed url=%{public}@ err=%{public}@",
@@ -394,6 +761,8 @@ static void twab_loadFFZSet(NSString *url, NSString *room) {
         if (![j isKindOfClass:NSDictionary.class]) return;
         id sets = j[@"sets"];
         if (![sets isKindOfClass:NSDictionary.class]) return;
+        NSString *roomKey = room.length ? room : TWAB_GLOBAL_ROOM;
+        NSMutableArray *cacheEntries = [NSMutableArray array];
         NSUInteger n = 0;
         for (NSString *setKey in sets) {
             id setVal = sets[setKey];
@@ -404,24 +773,33 @@ static void twab_loadFFZSet(NSString *url, NSString *room) {
                 if (![em isKindOfClass:NSDictionary.class]) continue;
                 NSString *name = em[@"name"];
                 NSNumber *idNum = em[@"id"];
-                // FFZ: animated emotes have an `animated` dict of
-                // {scale: cdn_path}. Static emotes have it null/absent.
                 id animatedDict = em[@"animated"];
                 BOOL animated = [animatedDict isKindOfClass:NSDictionary.class] &&
                                 ((NSDictionary *)animatedDict).count > 0;
                 if ([name isKindOfClass:NSString.class] && name.length &&
                     [idNum isKindOfClass:NSNumber.class]) {
-                    twab_registerEmote(name, @"ffz", idNum.stringValue, room, animated);
+                    CGFloat ratio = twab_ratioFromDims(em[@"width"], em[@"height"]);
+                    twab_registerEmote(name, @"ffz", idNum.stringValue, room, animated, ratio);
+                    [cacheEntries addObject:@{@"word": name, @"provider": @"ffz",
+                                              @"id": idNum.stringValue, @"animated": @(animated),
+                                              @"ratio": @(ratio)}];
                     n++;
                 }
             }
         }
+        if (cacheEntries.count)
+            twab_saveEmotesToDisk([NSString stringWithFormat:@"%@_ffz", roomKey], cacheEntries);
         os_log(OS_LOG_DEFAULT, "[TWAB-Emote] FFZ +%lu %{public}@", (unsigned long)n, url);
     }] resume];
 }
 
-// Fetch global emote sets — called once at startup.
+// Fetch global emote sets — called once at startup. Loads from disk cache
+// first for instant availability, then refreshes from APIs in background.
 static void twab_loadGlobalEmotes(void) {
+    dispatch_barrier_async(twab_emoteQueue(), ^{
+        for (NSString *prov in @[@"7tv", @"bttv", @"ffz"])
+            twab_registerCachedEmotesLocked(TWAB_GLOBAL_ROOM, prov);
+    });
     twab_load7TVSet(@"https://7tv.io/v3/emote-sets/global", nil);
     twab_loadBTTVGlobal();
     twab_loadFFZSet(@"https://api.frankerfacez.com/v1/set/global", nil);
@@ -443,6 +821,8 @@ static void twab_loadChannelEmotes(NSString *roomId) {
         [twab_loadedRooms() addObject:room];
         [lru addObject:room];
         os_log(OS_LOG_DEFAULT, "[TWAB-Emote] loading channel room=%{public}@", room);
+        for (NSString *prov in @[@"7tv", @"bttv", @"ffz"])
+            twab_registerCachedEmotesLocked(room, prov);
         twab_load7TVSet([NSString stringWithFormat:@"https://7tv.io/v3/users/twitch/%@", room], room);
         twab_loadBTTVChannel(room);
         twab_loadFFZSet([NSString stringWithFormat:@"https://api.frankerfacez.com/v1/room/id/%@", room], room);
@@ -463,7 +843,12 @@ void twab_reloadEmotes(void) {
         [twab_loadedRooms() removeAllObjects];
         [twab_lruRooms() removeAllObjects];
         [twab_roomFakeIds() removeAllObjects];
-        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] registry cleared by user reload");
+        NSString *cacheDir = twab_emoteCacheDir();
+        NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:cacheDir error:nil];
+        for (NSString *f in files)
+            [[NSFileManager defaultManager] removeItemAtPath:
+                [cacheDir stringByAppendingPathComponent:f] error:nil];
+        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] registry + cache cleared by user reload");
     });
     // Re-fetch globals off the barrier — twab_loadGlobalEmotes only kicks off
     // async URL tasks, and each registration takes its own barrier.
@@ -495,18 +880,18 @@ void twab_reloadEmotes(void) {
 // FFZ: animated emotes live at /animated/<scale>.gif; static at /<scale>
 // (no extension). The flag drives the path.
 static NSURL *twab_computeEmoteCDNURL(NSString *provider, NSString *realId, BOOL animated) {
-    if ([provider isEqualToString:@"7tv"]) {
-        NSString *ext = animated ? @"gif" : @"webp";
+    // WebP throughout: an animated emote's GIF is often 300-600 KB, its WebP
+    // a fraction of that. Tweak.x converts animated WebP to GIF on arrival.
+    if ([provider isEqualToString:@"7tv"])
         return [NSURL URLWithString:[NSString stringWithFormat:
-            @"https://cdn.7tv.app/emote/%@/2x.%@", realId, ext]];
-    }
+            @"https://cdn.7tv.app/emote/%@/2x.webp", realId]];
     if ([provider isEqualToString:@"bttv"])
         return [NSURL URLWithString:[NSString stringWithFormat:
-            @"https://cdn.betterttv.net/emote/%@/2x", realId]];
+            @"https://cdn.betterttv.net/emote/%@/2x.webp", realId]];
     if ([provider isEqualToString:@"ffz"]) {
         if (animated)
             return [NSURL URLWithString:[NSString stringWithFormat:
-                @"https://cdn.frankerfacez.com/emote/%@/animated/2.gif", realId]];
+                @"https://cdn.frankerfacez.com/emote/%@/animated/2.webp", realId]];
         return [NSURL URLWithString:[NSString stringWithFormat:
             @"https://cdn.frankerfacez.com/emote/%@/2", realId]];
     }
@@ -553,6 +938,15 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
     NSNumber *animBox = entry[@"animated"];
     BOOL animated = [animBox isKindOfClass:NSNumber.class] && [animBox boolValue];
     return twab_computeEmoteCDNURL(provider, realId, animated);
+}
+
+// For Tweak.x's completion-handler hook (used by native views such as the
+// chat box's emote preview).
+NSURL *twab_realEmoteURL(NSURL *url) {
+    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled]) return nil;
+    NSURL *real = twab_rewriteEmoteURL(url);
+    if (real) twab_emoteNetStart(real);
+    return real;
 }
 
 // The leaf NSURLSession implementation in iOS is __NSURLSessionLocal,
@@ -631,8 +1025,10 @@ static NSURL *twab_rewriteEmoteURL(NSURL *url) {
 
     // Emote URL rewrite (jtvnw.net emoticons -> 7TV/BTTV/FFZ CDNs).
     if (emotesOn) {
+        twab_noteSentChatRequest(request);
         NSURL *real = twab_rewriteEmoteURL(request.URL);
         if (real) {
+            twab_emoteNetStart(real);
             if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
             ((NSMutableURLRequest *)request).URL = real;
             return %orig(request);
@@ -795,8 +1191,17 @@ static NSUInteger twab_charCount(NSString *s, NSRange range) {
 
 // Observe non-PRIVMSG lines (ROOMSTATE etc.) for room-id so we can preload
 // channel emotes before any chat message arrives.
+static NSString *twab_myDisplayName;  // from USERSTATE / GLOBALUSERSTATE
+
 static void twab_observeIRCLine(NSString *line) {
     if (![line hasPrefix:@"@"]) return;
+    if ([line containsString:@" USERSTATE #"] || [line containsString:@" GLOBALUSERSTATE"]) {
+        NSRange te = [line rangeOfString:@" :"];
+        NSString *name = te.location != NSNotFound
+            ? twab_extractTag([line substringToIndex:te.location], @"display-name") : nil;
+        if (name.length) twab_myDisplayName = [name copy];
+        return;
+    }
     if (![line containsString:@" ROOMSTATE #"]) return;
     NSRange tagsEnd = [line rangeOfString:@" :"];
     if (tagsEnd.location == NSNotFound) return;
@@ -806,6 +1211,28 @@ static void twab_observeIRCLine(NSString *line) {
     NSString *room = [roomId copy];
     dispatch_barrier_async(twab_emoteQueue(), ^{ twab_currentRoom = room; });
     twab_loadChannelEmotes(room);
+}
+
+// Shift Twitch's own emote ranges ("id:s-e,s-e/id:s-e") to account for
+// marker text inserted at the given original code-point positions.
+static NSString *twab_shiftEmoteRanges(NSString *value, NSArray<NSArray<NSNumber *> *> *inserts) {
+    NSMutableArray *outGroups = [NSMutableArray array];
+    for (NSString *group in [value componentsSeparatedByString:@"/"]) {
+        NSRange colon = [group rangeOfString:@":"];
+        if (colon.location == NSNotFound) { [outGroups addObject:group]; continue; }
+        NSString *eid = [group substringToIndex:colon.location];
+        NSMutableArray *ranges = [NSMutableArray array];
+        for (NSString *r in [[group substringFromIndex:colon.location + 1] componentsSeparatedByString:@","]) {
+            NSArray *se = [r componentsSeparatedByString:@"-"];
+            if (se.count != 2) { [ranges addObject:r]; continue; }
+            NSInteger st = [se[0] integerValue], en = [se[1] integerValue], d = 0;
+            for (NSArray<NSNumber *> *ins in inserts)
+                if (ins[0].integerValue <= st) d += ins[1].integerValue;
+            [ranges addObject:[NSString stringWithFormat:@"%ld-%ld", (long)(st + d), (long)(en + d)]];
+        }
+        [outGroups addObject:[NSString stringWithFormat:@"%@:%@", eid, [ranges componentsJoinedByString:@","]]];
+    }
+    return [outGroups componentsJoinedByString:@"/"];
 }
 
 static NSString *twab_injectIRCEmotes(NSString *line) {
@@ -829,22 +1256,48 @@ static NSString *twab_injectIRCEmotes(NSString *line) {
     // Kick off channel emote load on first sight of a new room-id.
     NSString *roomId = twab_extractTag(tagsPart, @"room-id");
     if (roomId.length) twab_loadChannelEmotes(roomId);
+    if (roomId.length) {
+        __block NSUInteger roomCount = 0;
+        dispatch_sync(twab_emoteQueue(), ^{ roomCount = twab_roomFakeIds()[roomId].count; });
+        static CFAbsoluteTime lastWarn;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (!roomCount && now - lastWarn > 2) {
+            lastWarn = now;
+            os_log(OS_LOG_DEFAULT, "[TWAB-EmoteMsg] message arrived before this channel's emotes were loaded room=%{public}@", roomId);
+        }
+    }
 
     // Scan words for matches. Positions are code-point-based, so we track a
     // grapheme-cluster cursor separately from any UTF-16 indexing.
-    // Room-aware: only match emotes belonging to this channel or globals.
+    // Room-aware: channel emotes first, then globals.
+    // Wide emotes also get an invisible marker inserted before the word (see
+    // twab_markWideEmotes); later emote positions shift by its length.
+    BOOL markWide = [tweakDefaults boolForKey:TWABKeyFitWideEmotes];
     NSMutableArray<NSString *> *newEntries = [NSMutableArray array];
+    NSMutableArray<NSString *> *outWords = [NSMutableArray array];
+    NSMutableArray<NSArray<NSNumber *> *> *inserts = [NSMutableArray array];  // [origPos, len]
     NSArray<NSString *> *words = [text componentsSeparatedByString:@" "];
-    NSUInteger codePos = 0;
+    NSUInteger codePos = 0, shift = 0;
     for (NSString *word in words) {
         NSUInteger wordLen = twab_charCount(word, NSMakeRange(0, word.length));
-        NSString *fakeId = roomId.length ? twab_fakeIdForWord_inRoom(word, roomId)
-                                         : twab_fakeIdForWord(word);
-        if (fakeId && wordLen > 0) {
-            NSUInteger end = codePos + wordLen - 1;
+        NSString *fakeId = wordLen ? twab_fakeIdForWord_inRoom(word, roomId) : nil;
+        NSString *outWord = word;
+        if (fakeId) {
+            CGFloat q = markWide ? twab_wideRatioForEmoteId(fakeId) : 0;
+            if (q > 0) {
+                NSUInteger n = (NSUInteger)lround(q * 4.0);
+                NSMutableString *mark = [NSMutableString stringWithString:[NSString stringWithFormat:@"%C", (unichar)0x2063]];
+                for (NSUInteger k = 0; k < n; k++) [mark appendString:[NSString stringWithFormat:@"%C", (unichar)0x2064]];
+                outWord = [mark stringByAppendingString:word];
+                [inserts addObject:@[@(codePos), @(n + 1)]];
+                shift += n + 1;
+            }
+            NSUInteger start = codePos + shift;
             [newEntries addObject:[NSString stringWithFormat:@"%@:%lu-%lu",
-                                   fakeId, (unsigned long)codePos, (unsigned long)end]];
+                                   fakeId, (unsigned long)start,
+                                   (unsigned long)(start + wordLen - 1)]];
         }
+        [outWords addObject:outWord];
         codePos += wordLen + 1;  // +1 for the space separator
     }
     if (newEntries.count == 0) return nil;
@@ -865,6 +1318,7 @@ static NSString *twab_injectIRCEmotes(NSString *line) {
                                                                 : semicolon.location;
         NSString *existing = [tagsPart substringWithRange:NSMakeRange(valStart,
                                                                       valEnd - valStart)];
+        if (inserts.count && existing.length) existing = twab_shiftEmoteRanges(existing, inserts);
         NSString *newVal = existing.length
             ? [existing stringByAppendingFormat:@"/%@", combined]
             : combined;
@@ -874,6 +1328,12 @@ static NSString *twab_injectIRCEmotes(NSString *line) {
                    [tagsPart substringFromIndex:valEnd]];
     }
 
+    if (inserts.count) {
+        NSString *prefix = [line substringWithRange:NSMakeRange(tagsEnd.location,
+                                                                textStart - tagsEnd.location)];
+        return [NSString stringWithFormat:@"%@%@%@", newTags, prefix,
+                [outWords componentsJoinedByString:@" "]];
+    }
     return [newTags stringByAppendingString:[line substringFromIndex:tagsEnd.location]];
 }
 
@@ -1239,6 +1699,229 @@ static NSArray *twab_injectEmoteTokens(NSArray *tokens) {
     return result ?: tokens;
 }
 
+// Wide emotes: put an invisible marker (U+2063 then one U+2064 per quarter of
+// width/height) right before the emote so the text layout hook in Tweak.x
+// can give that emote a wider slot in the line.
+static NSArray *twab_markWideEmotes(NSArray *tokens) {
+    if (![tweakDefaults boolForKey:TWABKeyFitWideEmotes]) return tokens;
+    static Class textTokenCls, emoteTokenCls;
+    static id lastFlags;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        textTokenCls  = objc_getClass("KMPMCMessageTokenTextToken");
+        emoteTokenCls = objc_getClass("KMPMCMessageTokenEmoteToken");
+    });
+    if (!textTokenCls || !emoteTokenCls) return tokens;
+
+    // Flags only style the marker text, which is invisible, so any text
+    // token's flags will do (an emote-only message has none of its own).
+    for (id t in tokens) {
+        if (![t isKindOfClass:textTokenCls]) continue;
+        id f = nil;
+        @try { f = [t valueForKey:@"flags"]; } @catch (id e) {}
+        if (f) { lastFlags = f; break; }
+    }
+    id flags = lastFlags;
+    if (!flags) return tokens;
+
+    NSMutableArray *out = nil;
+    for (NSUInteger i = 0; i < tokens.count; i++) {
+        id t = tokens[i];
+        CGFloat q = 0;
+        if ([t isKindOfClass:emoteTokenCls]) {
+            id eid = nil;
+            @try { eid = [t valueForKey:@"id"]; } @catch (id e) {}
+            if ([eid isKindOfClass:NSString.class]) q = twab_wideRatioForEmoteId(eid);
+        }
+        if (q > 0) {
+            if (!out) out = [[tokens subarrayWithRange:NSMakeRange(0, i)] mutableCopy];
+            NSUInteger n = (NSUInteger)lround(q * 4.0);
+            NSMutableString *mark = [NSMutableString stringWithCapacity:n + 1];
+            [mark appendString:[NSString stringWithFormat:@"%C", (unichar)0x2063]];
+            for (NSUInteger k = 0; k < n; k++) [mark appendString:[NSString stringWithFormat:@"%C", (unichar)0x2064]];
+            id mt = ((id (*)(id, SEL, NSString *, id))objc_msgSend)(
+                [textTokenCls alloc], @selector(initWithText:flags:), mark, flags);
+            if (mt) [out addObject:mt];
+        }
+        if (out) [out addObject:t];
+    }
+    return out ?: tokens;
+}
+
+// ─── Your own sent messages: wide emote slots ──────────────────────────────
+//
+// Twitch's JavaScript shows your sent message straight away from your own
+// text, so it never gets the width marker IRC messages get. Instead we note
+// each message as it goes out over the chat socket, and the text layout
+// hook (Tweak.x) widens the attachments of a message ending with the same
+// words, for the words that are wide third-party emotes.
+
+static NSMutableArray<NSDictionary *> *twab_sentMessages(void) {
+    static NSMutableArray *a;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ a = [NSMutableArray array]; });
+    return a;
+}
+
+// {words, ratios, t} for `text`, or nil if it has no wide third-party emote.
+static NSDictionary *twab_wideWordsEntry(NSString *text) {
+    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled] ||
+        ![tweakDefaults boolForKey:TWABKeyFitWideEmotes] || !text.length) return nil;
+    NSArray<NSString *> *words = [[text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                                  componentsSeparatedByString:@" "];
+    NSMutableArray<NSNumber *> *ratios = [NSMutableArray arrayWithCapacity:words.count];
+    BOOL any = NO;
+    for (NSString *w in words) {
+        CGFloat q = w.length ? twab_wideRatioForEmoteId(twab_fakeIdForWord_inRoom(w, twab_currentRoom)) : 0;
+        [ratios addObject:@(q)];
+        if (q > 0) any = YES;
+    }
+    if (!any) return nil;
+    return @{@"words": words, @"ratios": ratios, @"t": @(CFAbsoluteTimeGetCurrent())};
+}
+
+// What's in the chat box. Your message is shown before it's sent anywhere,
+// so the draft is the only thing known in time to size its emotes.
+static NSDictionary *twab_draftEntry;
+
+static void twab_noteDraftText(NSString *text) {
+    NSDictionary *e = twab_wideWordsEntry(text);
+    if (!e) return;  // keep the last draft with emotes; the box clears on send
+    @synchronized (twab_sentMessages()) { twab_draftEntry = e; }
+}
+
+static void twab_noteSentText(NSString *text) {
+    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled] ||
+        ![tweakDefaults boolForKey:TWABKeyFitWideEmotes] || !text.length) return;
+    NSArray<NSString *> *words = [text componentsSeparatedByString:@" "];
+    NSMutableArray<NSNumber *> *ratios = [NSMutableArray arrayWithCapacity:words.count];
+    BOOL any = NO;
+    for (NSString *w in words) {
+        CGFloat q = w.length ? twab_wideRatioForEmoteId(twab_fakeIdForWord_inRoom(w, twab_currentRoom)) : 0;
+        [ratios addObject:@(q)];
+        if (q > 0) any = YES;
+    }
+    if (!any) return;
+    NSMutableArray *sent = twab_sentMessages();
+    @synchronized (sent) {
+        [sent addObject:@{@"words": words, @"ratios": ratios, @"t": @(CFAbsoluteTimeGetCurrent())}];
+        while (sent.count > 5) [sent removeObjectAtIndex:0];
+    }
+}
+
+static void twab_noteSentLine(NSString *line) {
+    NSRange pm = [line rangeOfString:@"PRIVMSG #"];
+    if (pm.location == NSNotFound) return;
+    NSRange sep = [line rangeOfString:@" :" options:0
+                                range:NSMakeRange(pm.location, line.length - pm.location)];
+    if (sep.location == NSNotFound) return;
+    twab_noteSentText([[line substringFromIndex:sep.location + 2]
+                       stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet]);
+}
+
+// Chat is sent with the SendChatMessage GQL mutation (input.message).
+static void twab_noteSentChatRequest(NSURLRequest *request) {
+    if (![request.URL.host isEqualToString:@"gql.twitch.tv"] || !request.HTTPBody) return;
+    NSData *needle = [@"\"SendChatMessage\"" dataUsingEncoding:NSUTF8StringEncoding];
+    if ([request.HTTPBody rangeOfData:needle options:0 range:NSMakeRange(0, request.HTTPBody.length)].location == NSNotFound)
+        return;
+    id body = [NSJSONSerialization JSONObjectWithData:request.HTTPBody options:0 error:nil];
+    for (id op in [body isKindOfClass:NSArray.class] ? body : (body ? @[body] : @[])) {
+        if (![op isKindOfClass:NSDictionary.class] || ![op[@"operationName"] isEqual:@"SendChatMessage"]) continue;
+        id input = [op[@"variables"] isKindOfClass:NSDictionary.class] ? op[@"variables"][@"input"] : nil;
+        id msg = [input isKindOfClass:NSDictionary.class] ? input[@"message"] : nil;
+        if ([msg isKindOfClass:NSString.class]) twab_noteSentText(msg);
+    }
+}
+
+// Returns (index in s.string, ratio) pairs to widen, as NSValue ranges
+// {location: index, length: quarters}.
+NSArray<NSValue *> *twab_sentEmoteSlots(NSString *str) {
+    NSMutableArray *sent = twab_sentMessages();
+    NSArray *snapshot;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    @synchronized (sent) {
+        if (!sent.count && !twab_draftEntry) return nil;
+        [sent filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *m, id b) {
+            return now - [m[@"t"] doubleValue] < 30;
+        }]];
+        snapshot = [sent copy];
+        if (twab_draftEntry && now - [twab_draftEntry[@"t"] doubleValue] < 60)
+            snapshot = [snapshot arrayByAddingObject:twab_draftEntry];
+    }
+    if (!snapshot.count || [str rangeOfString:@"\uFFFC"].location == NSNotFound) return nil;
+    // Twitch wraps message text in invisible direction marks (U+2068/U+2069,
+    // U+200E) and ends lines with a space; match on the text without them,
+    // keeping each kept character's index in the original string.
+    NSMutableString *clean = [NSMutableString stringWithCapacity:str.length];
+    NSMutableArray<NSNumber *> *origIndex = [NSMutableArray arrayWithCapacity:str.length];
+    for (NSUInteger k = 0; k < str.length; k++) {
+        unichar c = [str characterAtIndex:k];
+        if (c == 0x200E || c == 0x200F || (c >= 0x2066 && c <= 0x2069)) continue;
+        [clean appendFormat:@"%C", c];
+        [origIndex addObject:@(k)];
+    }
+    while (clean.length && [clean characterAtIndex:clean.length - 1] == ' ') {
+        [clean deleteCharactersInRange:NSMakeRange(clean.length - 1, 1)];
+        [origIndex removeLastObject];
+    }
+    NSArray<NSString *> *rendered = [clean componentsSeparatedByString:@" "];
+    for (NSDictionary *m in snapshot.reverseObjectEnumerator) {
+        NSArray<NSString *> *words = m[@"words"];
+        NSArray<NSNumber *> *ratios = m[@"ratios"];
+        if (rendered.count < words.count + 1) continue;
+        NSUInteger start = rendered.count - words.count;
+        // Must be your own line: "<you>: <message>".
+        NSString *me = twab_myDisplayName;
+        NSString *who = rendered[start - 1];
+        if (!me.length || ![who hasSuffix:@":"] ||
+            [[who substringToIndex:who.length - 1] rangeOfString:me
+                options:NSCaseInsensitiveSearch | NSBackwardsSearch | NSAnchoredSearch].location == NSNotFound) continue;
+        BOOL match = YES;
+        for (NSUInteger i = 0; i < words.count && match; i++) {
+            NSString *r = rendered[start + i];
+            match = [r isEqualToString:words[i]] || [r isEqualToString:@"\uFFFC"];
+        }
+        if (!match) continue;
+        NSUInteger offset = 0;
+        for (NSUInteger i = 0; i < start; i++) offset += rendered[i].length + 1;
+        NSMutableArray *slots = [NSMutableArray array];
+        for (NSUInteger i = 0; i < words.count; i++) {
+            NSString *r = rendered[start + i];
+            CGFloat q = ratios[i].doubleValue;
+            if (q > 0 && [r isEqualToString:@"\uFFFC"] && offset < origIndex.count)
+                [slots addObject:[NSValue valueWithRange:NSMakeRange(origIndex[offset].unsignedIntegerValue,
+                                                                     (NSUInteger)lround(q * 4.0))]];
+            offset += r.length + 1;
+        }
+        return slots.count ? slots : nil;
+    }
+    return nil;
+}
+
+// The chat box is Twitch's own native view (twitch_rn_emote_input). It tells
+// JavaScript the plain text (emote names, not images) through onChangeText;
+// wrapping that callback gives us the draft exactly as it will be sent.
+%hook _TtC21twitch_rn_emote_input20TwitchEmoteInputView
+- (void)setOnChangeText:(void (^)(NSDictionary *))block {
+    if (!block) { %orig; return; }
+    void (^wrapped)(NSDictionary *) = ^(NSDictionary *body) {
+        id text = [body isKindOfClass:NSDictionary.class] ? body[@"text"] : nil;
+        if ([text isKindOfClass:NSString.class]) twab_noteDraftText(text);
+        block(body);
+    };
+    %orig(wrapped);
+}
+%end
+
+%hook SRWebSocket
+- (BOOL)sendString:(NSString *)string error:(NSError **)error {
+    if ([string isKindOfClass:NSString.class] && [string containsString:@"PRIVMSG #"])
+        twab_noteSentLine(string);
+    return %orig;
+}
+%end
+
 // ─── Deferred tokenizer hook ────────────────────────────────────────────────
 //
 // KMPMCChatMessageTokenizer is a Kotlin/Native class — its ObjC methods are
@@ -1256,7 +1939,7 @@ static NSArray *twab_hookTokenizerChar(id self, SEL _cmd, NSString *message,
                        twab_origTokenizerChar)(self, _cmd, message, emoteRanges,
                                                gifRanges, bitsConfig, options, currentUser);
     if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled]) return tokens;
-    NSArray *result = twab_injectEmoteTokens(tokens);
+    NSArray *result = twab_markWideEmotes(twab_injectEmoteTokens(tokens));
     os_log(OS_LOG_DEFAULT, "[TWAB-Chat] tokenizerChar msg=\"%{public}@\" in=%lu out=%lu",
            message, (unsigned long)tokens.count, (unsigned long)result.count);
     return result;
@@ -1269,7 +1952,7 @@ static NSArray *twab_hookTokenizerUtf(id self, SEL _cmd, NSString *message,
                        twab_origTokenizerUtf)(self, _cmd, message, emoteRanges,
                                               gifRanges, bitsConfig, options, currentUser);
     if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled]) return tokens;
-    NSArray *result = twab_injectEmoteTokens(tokens);
+    NSArray *result = twab_markWideEmotes(twab_injectEmoteTokens(tokens));
     os_log(OS_LOG_DEFAULT, "[TWAB-Chat] tokenizerUtf msg=\"%{public}@\" in=%lu out=%lu",
            message, (unsigned long)tokens.count, (unsigned long)result.count);
     return result;

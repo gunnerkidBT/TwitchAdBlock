@@ -36,6 +36,7 @@ NSString *const TWABKeyDismissPinnedSeconds      = @"TWDismissPinnedSeconds";
 NSString *const TWABKeyHideClipButton            = @"TWHideClipButton";
 NSString *const TWABKeyProxyWhitelist            = @"TWProxyWhitelist";
 NSString *const TWABKeyChatEmoteScale            = @"TWChatEmoteScale";
+NSString *const TWABKeyChatTextScale             = @"TWChatTextScale";
 
 NSString *twab_effectiveProxyAddress(void) {
     return [tweakDefaults boolForKey:TWABKeyAdBlockCustomProxyEnabled]

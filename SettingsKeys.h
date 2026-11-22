@@ -89,8 +89,11 @@ extern NSString *const TWABKeyHideClipButton;
 extern NSString *const TWABKeyAutoClaimPoints;
 // NSString (comma-separated) - channels that skip the ad-block proxy.
 extern NSString *const TWABKeyProxyWhitelist;
-// NSInteger — emote size preset: 0 = Default (1.0x), 1 = Large (1.3x), 2 = Extra Large (1.6x).
+// NSInteger — emote size preset: 0 = Default (1.0x), 1 = Large (1.15x), 2 = Extra Large (1.3x).
 extern NSString *const TWABKeyChatEmoteScale;
+// NSInteger — text size preset: 0 = Default (1.0x), 1 = Large (1.15x), 2 = Extra Large (1.3x).
+// Beta: scales all React Native text in the app, not just chat.
+extern NSString *const TWABKeyChatTextScale;
 
 // Resolves which proxy address to use right now: the user's custom value
 // when the custom-proxy toggle is on, otherwise the bundled default.

@@ -5,6 +5,39 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.24 — November 22, 2026
+
+**Wide emotes at full size.** With Keep Wide Emote Shape on (Settings →
+Emotes, on by default), wide 7TV/BTTV/FFZ emotes now show at the same height
+as normal emotes, and the chat line makes room for them so nothing overlaps.
+
+**Much faster emotes.** Third-party emotes now show up almost instantly, even
+in busy chats. Each channel's emote list is remembered between launches, emote
+images load from a smaller format, and each image is only prepared once.
+
+**Fixed emotes showing as plain text.** If two channels used the same name for
+different emotes, the second channel's emote could show as text. Each channel
+now gets its own emotes, and a channel's emote wins over a global one with
+the same name, like the 7TV extension.
+
+**Your own emotes show up.** When you send a message with a 7TV, BTTV or
+FFZ emote, it now shows as the emote in your own chat right away instead of
+as text (wide ones at full size too), and the chat box previews it while
+you type.
+
+**7TV/BTTV/FFZ emotes in Twitch's emote picker.** Twitch's own emote picker
+now lists the channel's and global 7TV, BTTV and FFZ emotes in two extra
+sections, below your Twitch emotes.
+
+**Chat Text Size.** New option in Settings → Chat to make chat messages
+bigger: Default, Large, or Extra Large. Only chat messages change size; the
+rest of the app stays the same.
+
+**Bigger Emote Size steps.** Large and Extra Large are now noticeably bigger
+than Default.
+
+---
+
 ## v0.1.23 — November 21, 2026
 
 **Emote Size setting.** New option in Settings → Chat to make emotes bigger.

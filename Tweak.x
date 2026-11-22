@@ -419,7 +419,10 @@ static BOOL twab_isEmoteImageRequest(NSURLRequest *req) {
 
 // Returns the padded image, or nil to keep the original (already ~square,
 // not an image, or anything failed).
-static NSData *twab_padEmoteToSquare(NSData *data) {
+// Also turns animated WebP into GIF: emotes are downloaded as WebP (several
+// times smaller than the CDNs' GIFs) but Twitch's image view only animates
+// GIF. `pad` = Keep Wide Emote Shape is on.
+static NSData *twab_padEmoteToSquare(NSData *data, BOOL pad) {
   CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
   if (!src) return nil;
   size_t count = CGImageSourceGetCount(src);
@@ -427,17 +430,22 @@ static NSData *twab_padEmoteToSquare(NSData *data) {
   if (!first) { CFRelease(src); return nil; }
   size_t w = CGImageGetWidth(first), h = CGImageGetHeight(first);
   CGImageRelease(first);
-  // Within ~10% of square already looks fine stretched.
-  if (!w || !h || (w * 10 <= h * 11 && h * 10 <= w * 11)) { CFRelease(src); return nil; }
-  size_t side = MAX(w, h);
   BOOL animated = count > 1;
+  NSString *type = (__bridge NSString *)CGImageSourceGetType(src);
+  BOOL isWebP = [type isEqualToString:@"org.webmproject.webp"];
+  // Within ~10% of square already looks fine stretched.
+  BOOL needPad = pad && w && h && !(w * 10 <= h * 11 && h * 10 <= w * 11);
+  BOOL needGif = animated && isWebP;
+  if (!w || !h || (!needPad && !needGif)) { CFRelease(src); return nil; }
+  size_t cw = needPad ? MAX(w, h) : w, ch = needPad ? MAX(w, h) : h;
   NSMutableData *out = [NSMutableData data];
   CGImageDestinationRef dst = CGImageDestinationCreateWithData((__bridge CFMutableDataRef)out,
       animated ? CFSTR("com.compuserve.gif") : CFSTR("public.png"), count, NULL);
   if (!dst) { CFRelease(src); return nil; }
   if (animated) {
     NSDictionary *props = CFBridgingRelease(CGImageSourceCopyProperties(src, NULL));
-    NSNumber *loops = props[(id)kCGImagePropertyGIFDictionary][(id)kCGImagePropertyGIFLoopCount] ?: @0;
+    NSNumber *loops = props[(id)kCGImagePropertyGIFDictionary][(id)kCGImagePropertyGIFLoopCount] ?:
+                      props[@"{WebP}"][@"LoopCount"] ?: @0;
     CGImageDestinationSetProperties(dst, (__bridge CFDictionaryRef)@{
       (id)kCGImagePropertyGIFDictionary: @{ (id)kCGImagePropertyGIFLoopCount: loops } });
   }
@@ -445,18 +453,21 @@ static NSData *twab_padEmoteToSquare(NSData *data) {
   for (size_t i = 0; i < count; i++) {
     CGImageRef frame = CGImageSourceCreateImageAtIndex(src, i, NULL);
     if (!frame) continue;
-    CGContextRef ctx = CGBitmapContextCreate(NULL, side, side, 8, 0, cs,
+    CGContextRef ctx = CGBitmapContextCreate(NULL, cw, ch, 8, 0, cs,
                                              (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
     if (ctx) {
       size_t fw = CGImageGetWidth(frame), fh = CGImageGetHeight(frame);
-      CGContextDrawImage(ctx, CGRectMake((side - fw) / 2.0, (side - fh) / 2.0, fw, fh), frame);
+      CGContextDrawImage(ctx, CGRectMake((cw - fw) / 2.0, (ch - fh) / 2.0, fw, fh), frame);
       CGImageRef padded = CGBitmapContextCreateImage(ctx);
       NSDictionary *frameProps = nil;
       if (animated) {
         NSDictionary *fp = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(src, i, NULL));
         NSDictionary *gif = fp[(id)kCGImagePropertyGIFDictionary];
+        NSDictionary *webp = fp[@"{WebP}"];
         NSNumber *delay = gif[(id)kCGImagePropertyGIFUnclampedDelayTime] ?:
-                          gif[(id)kCGImagePropertyGIFDelayTime] ?: @0.1;
+                          gif[(id)kCGImagePropertyGIFDelayTime] ?:
+                          webp[@"UnclampedDelayTime"] ?:
+                          webp[@"DelayTime"] ?: @0.1;
         frameProps = @{ (id)kCGImagePropertyGIFDictionary: @{ (id)kCGImagePropertyGIFDelayTime: delay } };
       }
       if (padded) {
@@ -472,8 +483,9 @@ static NSData *twab_padEmoteToSquare(NSData *data) {
   CFRelease(dst);
   CFRelease(src);
   if (!ok || !out.length) return nil;
-  os_log(OS_LOG_DEFAULT, "[TWAB-Emote] padded %zux%zu%{public}s emote to %zux%zu", w, h,
-         animated ? " animated" : "", side, side);
+  os_log(OS_LOG_DEFAULT, "[TWAB-Emote] %{public}s %zux%zu%{public}s emote to %zux%zu (%lu -> %lu bytes)",
+         needPad ? "padded" : "converted", w, h, animated ? " animated" : "", cw, ch,
+         (unsigned long)data.length, (unsigned long)out.length);
   return out;
 }
 
@@ -487,23 +499,87 @@ static NSCache *twab_emoteFitCache(void) {
   return cache;
 }
 
+// The padded result is also kept on disk (empty file = "leave as is") so
+// each emote is only processed once, not on every launch. The CDN images
+// behind these URLs never change.
+// Cache key: the result depends on Keep Wide Emote Shape.
+static NSString *twab_fitKey(NSURL *url) {
+  return [url.absoluteString stringByAppendingString:
+          [tweakDefaults boolForKey:TWABKeyFitWideEmotes] ? @"#pad" : @"#nopad"];
+}
+
+static NSString *twab_fitDiskPath(NSURL *url) {
+  static NSString *dir;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    NSString *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+    dir = [caches stringByAppendingPathComponent:@"TwitchAdBlock/emote_fit"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
+                                               attributes:nil error:nil];
+  });
+  uint64_t h = 1469598103934665603ULL;
+  for (const char *c = twab_fitKey(url).UTF8String; c && *c; c++) { h ^= (uint8_t)*c; h *= 1099511628211ULL; }
+  return [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%016llx", h]];
+}
+
 // Cached result for `url`, or nil if not computed yet.
 static NSData *twab_cachedFitEmote(NSURL *url, NSData *data) {
-  id hit = url ? [twab_emoteFitCache() objectForKey:url] : nil;
-  if (!hit) return nil;
+  if (!url) return nil;
+  id hit = [twab_emoteFitCache() objectForKey:twab_fitKey(url)];
+  if (!hit) {
+    NSData *disk = [NSData dataWithContentsOfFile:twab_fitDiskPath(url)];
+    if (!disk) return nil;
+    hit = disk.length ? disk : (id)kCFNull;
+    [twab_emoteFitCache() setObject:hit forKey:twab_fitKey(url)];
+  }
   return hit == (id)kCFNull ? data : hit;
+}
+
+// Original width/height of emote images we've padded, by URL — padding
+// hides the real shape from anything that sees the image afterwards.
+static NSCache<NSString *, NSNumber *> *twab_emoteAspectCache(void) {
+  static NSCache *cache;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 2000; });
+  return cache;
+}
+
+CGFloat twab_emoteAspectForURL(NSURL *url) {
+  NSString *key = url.absoluteString;
+  return key ? [[twab_emoteAspectCache() objectForKey:key] doubleValue] : 0;
+}
+
+static void twab_recordEmoteAspect(NSURL *url, NSData *data) {
+  NSString *key = url.absoluteString;
+  if (!key) return;
+  CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+  if (!src) return;
+  NSDictionary *props = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(src, 0, NULL));
+  CFRelease(src);
+  double w = [props[(id)kCGImagePropertyPixelWidth] doubleValue];
+  double h = [props[(id)kCGImagePropertyPixelHeight] doubleValue];
+  if (w > 0 && h > 0) [twab_emoteAspectCache() setObject:@(w / h) forKey:key];
 }
 
 static NSData *twab_fitEmoteImage(NSURL *url, NSData *data) {
   NSData *cached = twab_cachedFitEmote(url, data);
   if (cached) return cached;
-  NSData *padded = twab_padEmoteToSquare(data);
-  if (url) [twab_emoteFitCache() setObject:padded ?: (id)kCFNull forKey:url];
+  twab_recordEmoteAspect(url, data);
+  NSData *padded = twab_padEmoteToSquare(data, [tweakDefaults boolForKey:TWABKeyFitWideEmotes]);
+  if (url) {
+    [twab_emoteFitCache() setObject:padded ?: (id)kCFNull forKey:twab_fitKey(url)];
+    NSString *path = twab_fitDiskPath(url);
+    NSData *toWrite = padded ?: [NSData data];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      [toWrite writeToFile:path atomically:YES];
+    });
+  }
   return padded ?: data;
 }
 
 // Delegate path: emote images arrive in chunks; hold them until the task
 // completes, then deliver the (padded) whole image in one go.
+extern NSData *twab_injectChatEmoteSets(NSData *data, NSURLRequest *request);
 static char twab_emoteBufferKey, twab_emoteFlushingKey, twab_emoteStartKey, twab_wholeResponseHeldKey;
 
 // Hide Leaderboard: this response can arrive in several chunks, which can't be
@@ -513,6 +589,35 @@ static BOOL twab_requestNamesOperation(NSURLRequest *request, NSString *operatio
   NSString *quoted = [NSString stringWithFormat:@"\"%@\"", operation];
   NSData *needle = [quoted dataUsingEncoding:NSUTF8StringEncoding];
   return [request.HTTPBody rangeOfData:needle options:0 range:NSMakeRange(0, request.HTTPBody.length)].location != NSNotFound;
+}
+
+// Emote downloads taking over a second are logged with where the time went.
+static NSMutableDictionary<NSString *, NSNumber *> *twab_emoteNetStarts;
+
+void twab_emoteNetStart(NSURL *url) {
+  NSString *k = url.absoluteString;
+  if (!k) return;
+  @synchronized (NSNull.null) {
+    if (!twab_emoteNetStarts) twab_emoteNetStarts = [NSMutableDictionary dictionary];
+    if (!twab_emoteNetStarts[k]) twab_emoteNetStarts[k] = @(CFAbsoluteTimeGetCurrent());
+  }
+}
+
+// firstByte 0 = unknown.
+static void twab_emoteNetEnd(NSURL *url, CFAbsoluteTime firstByte, double padMs, NSError *error, NSUInteger bytes) {
+  NSString *k = url.absoluteString;
+  if (!k) return;
+  NSNumber *st;
+  @synchronized (NSNull.null) {
+    st = twab_emoteNetStarts[k];
+    [twab_emoteNetStarts removeObjectForKey:k];
+  }
+  if (!st || error) return;
+  double total = (CFAbsoluteTimeGetCurrent() - st.doubleValue) * 1000;
+  if (total > 1000)
+    os_log(OS_LOG_DEFAULT, "[TWAB-EmoteNet] slow: %.0fms total, first byte after %.0fms, processing %.0fms, %lu bytes %{public}@%{public}@",
+           total, firstByte ? (firstByte - st.doubleValue) * 1000 : -1, padMs,
+           (unsigned long)bytes, url.host, url.path);
 }
 
 static NSData *twab_bufferEmoteChunk(NSData *data, NSURLSessionDataTask *task) {
@@ -546,10 +651,14 @@ static void twab_deliverEmote(id delegate, NSURLSession *session, NSURLSessionTa
 static BOOL twab_completeHeldEmote(id delegate, NSURLSession *session, NSURLSessionTask *task,
                                    void (^complete)(void)) {
   NSMutableData *buf = objc_getAssociatedObject(task, &twab_emoteBufferKey);
+  if (task.error && twab_isEmoteImageRequest(task.originalRequest))
+    twab_emoteNetEnd(task.originalRequest.URL, 0, 0, task.error, 0);
   if (!buf || ![task isKindOfClass:NSURLSessionDataTask.class]) return NO;
   objc_setAssociatedObject(task, &twab_emoteBufferKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
   if (objc_getAssociatedObject(task, &twab_wholeResponseHeldKey)) {
     NSData *edited = [buf twab_dataHidingLeaderboardsForRequest:task.originalRequest];
+    if (twab_requestNamesOperation(task.originalRequest, @"ChatEmoteSets"))
+      edited = twab_injectChatEmoteSets(edited, task.originalRequest);
     edited = twab_rewriteWatchLimitBytes(edited, task.currentRequest, NSStringFromClass([delegate class]));
     edited = [edited twab_responseDataForRequest:task.currentRequest];
     twab_deliverEmote(delegate, session, task, edited);
@@ -560,6 +669,7 @@ static BOOL twab_completeHeldEmote(id delegate, NSURLSession *session, NSURLSess
   CFAbsoluteTime start = [objc_getAssociatedObject(task, &twab_emoteStartKey) doubleValue];
   NSData *cached = buf.length ? twab_cachedFitEmote(url, buf) : buf;
   if (cached) {
+    if (!task.error) twab_emoteNetEnd(url, start, 0, nil, buf.length);
     twab_deliverEmote(delegate, session, task, cached);
     complete();
     return YES;
@@ -571,10 +681,7 @@ static BOOL twab_completeHeldEmote(id delegate, NSURLSession *session, NSURLSess
     void (^finish)(void) = ^{
       twab_deliverEmote(delegate, session, task, out);
       complete();
-      CFAbsoluteTime totalMs = start ? (CFAbsoluteTimeGetCurrent() - start) * 1000 : 0;
-      if (totalMs > 250)
-        os_log(OS_LOG_DEFAULT, "[TWAB-Emote] slow emote: %.0f ms from first byte to delivery (padding %.0f ms) %{public}@",
-               totalMs, padMs, url.lastPathComponent ?: @"");
+      if (!task.error) twab_emoteNetEnd(url, start, padMs, nil, buf.length);
     };
     NSOperationQueue *q = session.delegateQueue;
     if (q) [q addOperationWithBlock:finish];
@@ -590,7 +697,6 @@ static NSData *twab_filteredFeedData(id delegate, NSData *data, NSURLSessionData
   // (only for delegates that tell us about completion, or nothing would flush).
   if (!objc_getAssociatedObject(dataTask, &twab_emoteFlushingKey) &&
       [tweakDefaults boolForKey:TWABKeyEmotesEnabled] &&
-      [tweakDefaults boolForKey:TWABKeyFitWideEmotes] &&
       twab_isEmoteImageRequest(dataTask.originalRequest) &&
       [delegate respondsToSelector:@selector(URLSession:task:didCompleteWithError:)])
     return twab_bufferEmoteChunk(data, dataTask);
@@ -609,6 +715,9 @@ static NSData *twab_filteredFeedData(id delegate, NSData *data, NSURLSessionData
          twab_requestNamesOperation(dataTask.originalRequest, @"CommunityChallengeGoals") ||
          twab_requestNamesOperation(dataTask.originalRequest, @"ChannelDropsCampaigns") ||
          twab_requestNamesOperation(dataTask.originalRequest, @"DropChannelCampaignsProgress")))
+      needHold = YES;
+    if (!needHold && [tweakDefaults boolForKey:TWABKeyEmotesEnabled] &&
+        twab_requestNamesOperation(dataTask.originalRequest, @"ChatEmoteSets"))
       needHold = YES;
     if (needHold) {
       objc_setAssociatedObject(dataTask, &twab_wholeResponseHeldKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -738,15 +847,20 @@ typedef void (^twab_dataCompletion)(NSData *, NSURLResponse *, NSError *);
 static twab_dataCompletion twab_wrapWatchCompletion(NSURLRequest *request, twab_dataCompletion handler) {
   if (!handler) return handler;
   return ^(NSData *data, NSURLResponse *response, NSError *error) {
-    if (data && [tweakDefaults boolForKey:TWABKeyEmotesEnabled] &&
-        [tweakDefaults boolForKey:TWABKeyFitWideEmotes] && twab_isEmoteImageRequest(request)) {
+    if (data && [tweakDefaults boolForKey:TWABKeyEmotesEnabled] && twab_isEmoteImageRequest(request)) {
       // Wide 3rd-party emotes. Cached → now; otherwise pad off this queue
       // and call back on it, so padding never stalls other responses.
       NSData *cached = twab_cachedFitEmote(request.URL, data);
-      if (cached) { handler(cached, response, error); return; }
+      if (cached) {
+        twab_emoteNetEnd(request.URL, 0, 0, error, data.length);
+        handler(cached, response, error);
+        return;
+      }
       NSOperationQueue *back = NSOperationQueue.currentQueue;
       dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        CFAbsoluteTime padStart = CFAbsoluteTimeGetCurrent();
         NSData *out = twab_fitEmoteImage(request.URL, data);
+        twab_emoteNetEnd(request.URL, 0, (CFAbsoluteTimeGetCurrent() - padStart) * 1000, error, data.length);
         if (back) [back addOperationWithBlock:^{ handler(out, response, error); }];
         else handler(out, response, error);
       });
@@ -756,10 +870,28 @@ static twab_dataCompletion twab_wrapWatchCompletion(NSURLRequest *request, twab_
   };
 }
 
+extern NSURL *twab_realEmoteURL(NSURL *url);
+
 %hook __NSURLSessionLocal
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
                             completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+  // Our 3rd-party emote IDs only exist on their real CDNs.
+  NSURL *real = request.URL ? twab_realEmoteURL(request.URL) : nil;
+  if (real) {
+    NSMutableURLRequest *m = request.mutableCopy;
+    m.URL = real;
+    request = m;
+  }
   return %orig(request, twab_wrapWatchCompletion(request, completionHandler));
+}
+// The chat box's emote previews use sharedSession dataTaskWithURL:.
+- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url
+                        completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+  NSURL *real = url ? twab_realEmoteURL(url) : nil;
+  if (real && completionHandler)
+    return [(NSURLSession *)self dataTaskWithRequest:[NSURLRequest requestWithURL:real]
+                                   completionHandler:completionHandler];
+  return %orig(real ?: url, completionHandler);
 }
 %end
 
@@ -1041,14 +1173,102 @@ static void twab_schedulePinnedDismiss(UIView *view, NSString *testID) {
          (long)seconds, testID);
 }
 
-// ─── Emote scaling ───────────────────────────────────────────────────────────
-// Stored as integer index: 0 = Default (1.0x), 1 = Large (1.15x), 2 = Extra Large (1.3x).
-static CGFloat twab_emoteScale(void) {
-  NSInteger idx = [tweakDefaults integerForKey:TWABKeyChatEmoteScale];
-  if (idx == 1) return 1.15;
-  if (idx == 2) return 1.3;
+// ─── Chat text + emote scaling ──────────────────────────────────────────────
+static BOOL twab_isInsideChatMessageList(UIView *view);
+static CGFloat twab_chatTextScale(void);
+static CGFloat twab_chatTextScale(void) {
+  NSInteger idx = [tweakDefaults integerForKey:TWABKeyChatTextScale];
+  if (idx == 1) return 1.25;
+  if (idx == 2) return 1.5;
   return 1.0;
 }
+
+static CGFloat twab_emoteScale(void) {
+  NSInteger idx = [tweakDefaults integerForKey:TWABKeyChatEmoteScale];
+  if (idx == 1) return 1.25;
+  if (idx == 2) return 1.5;
+  return 1.0;
+}
+
+// Hook RCTFont to scale font size directly for chat text. We modify the `size`
+// parameter rather than `scaleMultiplier` because Twitch sets allowFontScaling=false
+// (scaleMultiplier=0) on chat text, bypassing the multiplier path entirely.
+// Font scaling in the layout manager, for chat message lines only — both
+// measurement and drawing use the scaled fonts, so text reflows correctly.
+// Wide emotes: Twitch gives every emote a square slot. Emotes.x puts a
+// marker (U+2063 + one U+2064 per quarter of width/height) before wide ones;
+// widening that attachment makes the line leave room for the whole emote.
+static void twab_widenMarkedAttachments(NSAttributedString *s) {
+  NSString *str = s.string;
+  if ([str rangeOfString:[NSString stringWithFormat:@"%C", (unichar)0x2063]].location == NSNotFound) return;
+  NSUInteger len = str.length;
+  for (NSUInteger i = 0; i < len; i++) {
+    if ([str characterAtIndex:i] != 0x2063) continue;
+    NSUInteger j = i + 1, n = 0;
+    while (j < len && [str characterAtIndex:j] == 0x2064) { n++; j++; }
+    if (j >= len || n < 5) continue;
+    NSTextAttachment *att = [s attribute:NSAttachmentAttributeName atIndex:j effectiveRange:NULL];
+    if (![att isKindOfClass:[NSTextAttachment class]]) continue;
+    CGRect b = att.bounds;
+    if (b.size.height <= 0) continue;
+    b.size.width = round(b.size.height * (CGFloat)n / 4.0);
+    att.bounds = b;
+    i = j;
+  }
+}
+
+extern NSArray<NSValue *> *twab_sentEmoteSlots(NSString *str);
+
+// Your own sent message: see twab_sentEmoteSlots in Emotes.x.
+static void twab_widenSentAttachments(NSAttributedString *s) {
+  for (NSValue *v in twab_sentEmoteSlots(s.string)) {
+    NSRange r = v.rangeValue;
+    if (r.location >= s.length) continue;
+    NSTextAttachment *att = [s attribute:NSAttachmentAttributeName atIndex:r.location effectiveRange:NULL];
+    if (![att isKindOfClass:[NSTextAttachment class]]) continue;
+    CGRect b = att.bounds;
+    if (b.size.height <= 0) continue;
+    b.size.width = round(b.size.height * (CGFloat)r.length / 4.0);
+    att.bounds = b;
+  }
+}
+
+// Chat message lines are "<name>: <message>" with the name and the message
+// each wrapped in invisible U+2068...U+2069 marks; other text in the app isn't.
+static BOOL twab_isChatMessageLine(NSString *str) {
+  static NSString *needle;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ needle = [NSString stringWithFormat:@"%C: %C", (unichar)0x2069, (unichar)0x2068]; });
+  return [str rangeOfString:needle].location != NSNotFound;
+}
+
+%hook RCTTextLayoutManager
+- (NSAttributedString *)_nsAttributedStringFromAttributedString:(const void *)attributedString {
+  NSAttributedString *result = %orig;
+  if (result.length && [tweakDefaults boolForKey:TWABKeyFitWideEmotes]) {
+    twab_widenMarkedAttachments(result);
+    twab_widenSentAttachments(result);
+  }
+  CGFloat scale = twab_chatTextScale();
+  if (fabs(scale - 1.0) < 0.01 || result.length == 0 || !twab_isChatMessageLine(result.string)) return result;
+
+  NSMutableAttributedString *scaled = [result mutableCopy];
+  [scaled enumerateAttribute:NSFontAttributeName
+                     inRange:NSMakeRange(0, scaled.length)
+                     options:0
+                  usingBlock:^(UIFont *font, NSRange range, BOOL *stop) {
+    if (!font) return;
+    // Skip attachment characters (emote/image placeholders) — scaling their
+    // font disrupts inline image sizing and makes emotes disappear.
+    if ([scaled attribute:NSAttachmentAttributeName atIndex:range.location effectiveRange:nil]) return;
+    [scaled addAttribute:NSFontAttributeName
+                   value:[font fontWithSize:font.pointSize * scale]
+                   range:range];
+  }];
+  return scaled;
+}
+%end
+
 
 static BOOL twab_isInsideChatMessageList(UIView *view) {
   for (UIView *v = view.superview; v; v = v.superview) {
@@ -1058,6 +1278,8 @@ static BOOL twab_isInsideChatMessageList(UIView *view) {
   }
   return NO;
 }
+
+static void twab_scaleEmoteIfNeeded(UIView *view);
 
 %hook RCTViewComponentView
 - (void)setAccessibilityIdentifier:(NSString *)identifier {
@@ -1093,6 +1315,13 @@ static BOOL twab_isInsideChatMessageList(UIView *view) {
 - (void)updateLayoutMetrics:(const void *)layoutMetrics oldLayoutMetrics:(const void *)oldLayoutMetrics {
   %orig;
   UIView *view = (UIView *)self;
+  // A wide emote's slot can widen after its image was laid out.
+  if ([view.accessibilityIdentifier hasPrefix:@"chat-emote-wrapper-"]) {
+    static Class imgCls;
+    if (!imgCls) imgCls = objc_getClass("RCTImageComponentView");
+    for (UIView *sub in view.subviews)
+      if ([sub isKindOfClass:imgCls]) twab_scaleEmoteIfNeeded(sub);
+  }
   // Layout can reset `hidden` from React Native's own display value.
   if (objc_getAssociatedObject(view, &twab_declutterHiddenKey)) view.hidden = YES;
   NSString *testID = view.accessibilityIdentifier;
@@ -1152,17 +1381,94 @@ static BOOL twab_isInsideChatMessageList(UIView *view) {
 // ─── Emote scaling ──────────────────────────────────────────────────────────
 // RCTImageComponentView emote scaling. Only scale images larger than badge
 // size (~18pt) so subscriber/VIP/mod badges stay at their normal size.
+
+extern CGFloat twab_wideRatioForEmoteId(NSString *fakeId);
+static char twab_wideOrigKey;
+
+// Chat emote images carry testID "chat-emote-<id>" inside a wrapper with
+// "chat-emote-wrapper-<id>".
+static NSString *twab_chatEmoteId(UIView *view) {
+  UIView *v = view;
+  for (int k = 0; k < 3 && v; k++, v = v.superview) {
+    NSString *aid = v.accessibilityIdentifier;
+    if ([aid hasPrefix:@"chat-emote-wrapper-"]) return [aid substringFromIndex:19];
+    if ([aid hasPrefix:@"chat-emote-"] && ![aid hasPrefix:@"chat-emote-press-"])
+      return [aid substringFromIndex:11];
+  }
+  return nil;
+}
+
+// The text layout leaves a slot h*ratio wide for a wide emote (see
+// twab_widenMarkedAttachments) but the view stays h×h at the slot's left
+// edge. Grow it to a (h*ratio)-sided square centred on the line: the image
+// is padded to square, so its visible part exactly fills the slot.
+static void twab_restoreWideEmote(UIView *view) {
+  NSArray *orig = objc_getAssociatedObject(view, &twab_wideOrigKey);
+  if (!orig) return;
+  objc_setAssociatedObject(view, &twab_wideOrigKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  view.bounds = [orig[0] CGRectValue];
+  view.center = [orig[1] CGPointValue];
+  for (UIView *sub in view.subviews)
+    if ([sub isKindOfClass:[UIImageView class]]) sub.frame = view.bounds;
+}
+
+static void twab_layoutWideEmote(UIView *view) {
+  CGFloat q = 0;
+  if ([tweakDefaults boolForKey:TWABKeyFitWideEmotes])
+    q = twab_wideRatioForEmoteId(twab_chatEmoteId(view));
+  NSArray *orig = objc_getAssociatedObject(view, &twab_wideOrigKey);
+  CGFloat h = orig ? [orig[0] CGRectValue].size.height : view.bounds.size.height;
+  // Only grow into a slot the text layout actually widened; otherwise the
+  // emote would cover its neighbours.
+  CGFloat slotW = view.superview.bounds.size.width;
+  if (q <= 0 || h < 10 || h > 80 || slotW < h * 1.15) {
+    twab_restoreWideEmote(view);
+    return;
+  }
+  if (!orig) {
+    orig = @[[NSValue valueWithCGRect:view.bounds], [NSValue valueWithCGPoint:view.center]];
+    objc_setAssociatedObject(view, &twab_wideOrigKey, orig, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+  CGPoint oc = [orig[1] CGPointValue];
+  CGFloat w = round(slotW);
+  CGRect b = CGRectMake(0, 0, w, w);
+  CGPoint c = CGPointMake(oc.x - h / 2.0 + w / 2.0, oc.y);
+  if (!CGRectEqualToRect(view.bounds, b)) view.bounds = b;
+  if (!CGPointEqualToPoint(view.center, c)) view.center = c;
+  for (UIView *sub in view.subviews) {
+    if (![sub isKindOfClass:[UIImageView class]]) continue;
+    if (!CGRectEqualToRect(sub.frame, b)) sub.frame = b;
+    sub.contentMode = UIViewContentModeScaleAspectFit;
+    // The image view carries a mask sized to the original square, which
+    // would crop the grown image to its top-left corner.
+    CALayer *mask = sub.layer.mask;
+    if ([mask isKindOfClass:[CAShapeLayer class]]) {
+      sub.layer.mask = nil;
+    } else if (mask && !CGRectEqualToRect(mask.frame, sub.layer.bounds)) {
+      [CATransaction begin];
+      [CATransaction setDisableActions:YES];
+      mask.frame = sub.layer.bounds;
+      [CATransaction commit];
+    }
+  }
+  for (UIView *p = view.superview; p && p != view.window; p = p.superview) {
+    if (p.clipsToBounds) p.clipsToBounds = NO;
+    if ([p.accessibilityIdentifier isEqualToString:@"chat-message-list"]) break;
+  }
+}
+
 static void twab_scaleEmoteIfNeeded(UIView *view) {
+  twab_layoutWideEmote(view);
   if (!view.window) return;
-  CGFloat scale = twab_emoteScale();
-  if (fabs(scale - 1.0) < 0.01) {
+  CGFloat totalScale = twab_emoteScale();
+  if (fabs(totalScale - 1.0) < 0.01) {
     view.transform = CGAffineTransformIdentity;
     return;
   }
   CGSize sz = view.bounds.size;
   if (sz.width < 20 || sz.height < 20) return;
   if (!twab_isInsideChatMessageList(view)) return;
-  view.transform = CGAffineTransformMakeScale(scale, scale);
+  view.transform = CGAffineTransformMakeScale(totalScale, totalScale);
   for (UIView *p = view.superview; p; p = p.superview) {
     if (p.clipsToBounds) p.clipsToBounds = NO;
     NSString *aid = p.accessibilityIdentifier;
@@ -1176,11 +1482,26 @@ static void twab_scaleEmoteIfNeeded(UIView *view) {
   twab_scaleEmoteIfNeeded((UIView *)self);
 }
 - (void)updateLayoutMetrics:(const void *)layoutMetrics oldLayoutMetrics:(const void *)oldLayoutMetrics {
+  twab_restoreWideEmote((UIView *)self);
+  %orig;
+  twab_scaleEmoteIfNeeded((UIView *)self);
+}
+- (void)updateProps:(const void *)props oldProps:(const void *)oldProps {
+  %orig;
+  twab_scaleEmoteIfNeeded((UIView *)self);
+}
+- (void)updateState:(const void *)state oldState:(const void *)oldState {
+  %orig;
+  twab_scaleEmoteIfNeeded((UIView *)self);
+}
+- (void)layoutSubviews {
   %orig;
   twab_scaleEmoteIfNeeded((UIView *)self);
 }
 - (void)prepareForRecycle {
-  ((UIView *)self).transform = CGAffineTransformIdentity;
+  UIView *v = (UIView *)self;
+  v.transform = CGAffineTransformIdentity;
+  twab_restoreWideEmote(v);
   %orig;
 }
 %end

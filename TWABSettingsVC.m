@@ -365,6 +365,8 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                 NSInteger emoteRow = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 5 : 4;
                 if (indexPath.row == emoteRow)
                     return [self emoteSizeCell];
+                if (indexPath.row == emoteRow + 1)
+                    return [self textSizeCell];
             }
             return [self actionCellWithTitle:LOC(@"settings.emotes.reload", @"Reload Emotes")
                                     subtitle:LOC(@"settings.emotes.reload.desc",
@@ -1133,7 +1135,8 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     if (indexPath.section == 1 && indexPath.row >= 2) return 44.0;
     if (indexPath.section == 2) {
         NSInteger emoteRow = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 5 : 4;
-        if (indexPath.row == emoteRow) return 70.0;
+        NSInteger textRow = emoteRow + 1;
+        if (indexPath.row == emoteRow || indexPath.row == textRow) return 70.0;
     }
     return UITableViewAutomaticDimension;
 }
@@ -1167,7 +1170,7 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 // is on], reload emotes (always last).
 - (NSInteger)chatRowCount {
     NSInteger base = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 6 : 5;
-    return base + 1; // emote size selector
+    return base + 2; // emote size + text size selectors
 }
 
 // Section 4 row count. Base: 12 fixed rows (go ad-free through clip button).
@@ -1322,6 +1325,39 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     [tweakDefaults setInteger:seg.selectedSegmentIndex forKey:TWABKeyChatEmoteScale];
 }
 
+- (UITableViewCell *)textSizeCell {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                                   reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+    UILabel *title = [UILabel new];
+    title.text = @"Chat Text Size";
+    title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Default", @"Large", @"Extra Large"]];
+    NSInteger idx = [tweakDefaults integerForKey:TWABKeyChatTextScale];
+    if (idx < 0 || idx > 2) idx = 0;
+    seg.selectedSegmentIndex = idx;
+    [seg addTarget:self action:@selector(textSizeChanged:) forControlEvents:UIControlEventValueChanged];
+    seg.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [cell.contentView addSubview:title];
+    [cell.contentView addSubview:seg];
+    [NSLayoutConstraint activateConstraints:@[
+        [title.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [title.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+        [seg.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [seg.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [seg.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:8],
+    ]];
+    return cell;
+}
+
+- (void)textSizeChanged:(UISegmentedControl *)seg {
+    [tweakDefaults setInteger:seg.selectedSegmentIndex forKey:TWABKeyChatTextScale];
+}
+
 #pragma mark - Tools (reload / export / import / diagnostics)
 
 // The subset of defaults keys that export/import round-trips. Proxy list,
@@ -1344,7 +1380,8 @@ static NSArray<NSString *> *twab_exportKeys(void) {
               TWABKeyDismissPinnedSeconds,
               TWABKeyHideClipButton, TWABKeyAutoClaimPoints,
               TWABKeyProxyWhitelist,
-              TWABKeyChatEmoteScale ];
+              TWABKeyChatEmoteScale,
+              TWABKeyChatTextScale ];
 }
 
 - (void)openKofi {
