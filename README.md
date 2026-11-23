@@ -26,23 +26,42 @@ A modified Twitch iOS app that blocks ads and adds some handy extras.
 - Works out of the box with a built-in proxy, or you can add your own (including
   a list of backups it tries in order).
 - Skips the proxy automatically if you already have a subscription or Turbo —
-  you're already ad-free, and it keeps your account details private.
+  you're already ad-free, and it keeps your account details private. You can
+  also pick channels to always skip it for.
 
 ### Chat emotes
 - Shows **7TV**, **BetterTTV**, and **FrankerFaceZ** emotes right in chat, both
-  global and per-channel.
-- **Send them too:** tap into chat and a **7TV** bar appears above the keyboard
-  (or press and hold Twitch's emote button). It opens a searchable list of the
-  channel's emotes, animated ones included. Tap one to type it into your message.
+  global and per-channel, animated ones included. A channel's own emote wins
+  over a global one with the same name, like the 7TV browser extension.
+- **Fast:** each channel's emote list is remembered between launches, and
+  emotes download in a small format, so they show up almost instantly even in
+  busy chats.
+- **Wide emotes at full size** — wide emotes keep their shape and show as tall
+  as normal ones, and the chat line makes room for them so nothing overlaps.
+- **Send them too:** type an emote's name, pick it from Twitch's own emote
+  picker (third-party emotes get their own sections there), or use the **7TV**
+  bar above the keyboard (or press and hold Twitch's emote button) for a
+  searchable list. Your own messages show the emotes right away, and the chat
+  box previews them while you type.
 - A **Reload Emotes** button to refresh them if a streamer adds new ones while
   you're watching.
+
+### Chat
+- **Emote Size** and **Chat Text Size** — make emotes and chat messages bigger
+  (Default, Large, Extra Large) without changing the rest of the app.
+- **Keep Deleted Messages** — see messages a moderator removed, with an
+  optional highlighted note.
+- **Auto-Claim Bonus Points** — collects the channel points bonus for you.
 
 ### Make the app yours
 - **Keep Live Feed Playing** — stops the Live feed cutting a stream off and
   forcing you to tap Watch or Follow.
 - **Pick your launch screen** — open straight to Following, Live, Clips, Browse,
   and more, instead of Twitch's default.
-- **Hide Twitch Stories** — removes the Stories bar at the top of the Home tab.
+- **Declutter** — hide the things you don't use: Stories, "From Channels You
+  Follow", the leaderboard, Subscribe/Bits/Clip/Extensions buttons, the channel
+  bar, the "+" (Create) tab, and banners above chat (pinned messages, hype
+  trains, predictions, polls, sub goals, Drops).
 - Clearer settings — a short description under each option, grouped under
   headings.
 
@@ -80,6 +99,12 @@ the `-noplugins` IPA from Releases instead.
 Grab it from the [Releases](https://github.com/gunnerkidBT/TwitchAdBlock/releases)
 page and install it with AltStore / SideStore (drag in the IPA) or TrollStore
 (tap **+**, pick the IPA).
+
+### Jailbroken?
+
+Each release also has a `.deb`: `iphoneos-arm` for rootful jailbreaks
+(unc0ver, checkra1n) and `iphoneos-arm64` for rootless ones (Dopamine,
+palera1n). Install it with your package manager.
 
 ---
 
@@ -135,25 +160,42 @@ page and jump to **Install**.
    Add `--no-plugins` to strip the app extensions (fewer App IDs on a free
    Apple ID).
 
+**Building the jailbreak debs**
+
+```bash
+make package FINALPACKAGE=1                               # rootful (iphoneos-arm)
+make clean
+make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless # rootless (iphoneos-arm64)
+```
+
+On WSL, build from a copy of the repo inside your Linux home folder: files on
+the Windows drive show up with permissions `dpkg-deb` refuses ("control
+directory has bad permissions 777").
+
 **Publishing a release (maintainer)**
 
-1. Inject with `--mod-version`, so each mod release gets its own build number.
-   That's how AltStore knows there's an update when only the mod changed:
+1. Bump `Version:` in `control` and `PACKAGE_VERSION` in the `Makefile`, and
+   add a `## vX.Y.Z` section to CHANGELOG.md.
+2. Inject with `--mod-version`, so each mod release gets its own build number.
+   That's how AltStore knows there's an update when only the mod changed. Build
+   the `--no-plugins` IPA and both debs as well:
 
    ```bash
-   python3 inject_ipa.py Twitch-decrypted.ipa .theos/obj/debug/arm64/TwitchAdBlock.dylib \
-       tv.twitch-31.7-TwitchAdBlock-0.1.14.ipa --mod-version 0.1.14
+   python3 inject_ipa.py Twitch-decrypted.ipa .theos/obj/debug/TwitchAdBlock.dylib \
+       tv.twitch-32.1-TwitchAdBlock-0.1.24.ipa --mod-version 0.1.24
    ```
 
-2. Upload the IPA(s) to a GitHub release tagged like `v31.7-0.1.14`.
-3. Add the release to the source and commit `apps.json`:
+3. Upload the IPAs and debs to a GitHub release tagged like `v32.1-0.1.24`.
+4. Add the release to the source and commit `apps.json`:
 
    ```bash
-   python3 make_source.py tv.twitch-31.7-TwitchAdBlock-0.1.14.ipa --tag v31.7-0.1.14
+   python3 make_source.py tv.twitch-32.1-TwitchAdBlock-0.1.24.ipa --tag v32.1-0.1.24
    ```
 
-   The "What's New" text comes from the matching `## v0.1.14` section of
-   CHANGELOG.md. For a Twitch-only rebuild, pass e.g. `--heading "Twitch 30.8"`.
+   The "What's New" text comes from the matching `## v0.1.24` section of
+   CHANGELOG.md. For a Twitch-only rebuild, pass e.g. `--heading "Twitch 32.2"`.
+   Every version in `apps.json` needs a unique build number, or AltStore
+   rejects the whole source.
 
 **Install**
 
