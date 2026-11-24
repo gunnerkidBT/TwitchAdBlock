@@ -16,8 +16,9 @@ points button was showing your points total. It now stays visible.
 **Fixed channels wrongly blocked for your region.** Some channels showed
 "Due to your age and/or region, you cannot access this content" (for example
 ones labelled Gambling) or said they were restricted in your country, even
-though they work for you normally. They now open as they would without
-TwitchMods.
+though they work for you normally. Content restrictions are now based on
+your own location, so these channels open just like they would on regular
+Twitch.
 
 **More reliable when a server has problems.** With more than one server set
 up, TwitchMods checks them in the background, spreads streams across the
