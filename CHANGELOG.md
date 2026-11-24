@@ -5,6 +5,46 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.25 — November 24, 2026
+
+**Updated for Twitch 32.2.**
+
+**Fixed the chat box disappearing.** While typing a longer message, the chat
+box could go blank above the keyboard for a moment, mostly when your channel
+points button was showing your points total. It now stays visible.
+
+**Fixed channels wrongly blocked for your region.** Some channels showed
+"Due to your age and/or region, you cannot access this content" (for example
+ones labelled Gambling) or said they were restricted in your country, even
+though they work for you normally. They now open as they would without
+TwitchMods.
+
+**More reliable when a server has problems.** With more than one server set
+up, TwitchMods checks them in the background, spreads streams across the
+ones that work, and switches to another automatically if one goes down. The
+status in settings now shows how many are online.
+
+**Choose your server.** Tap "Default proxy" in settings to pick a country
+yourself, with each one's current speed shown, or leave it on Automatic
+(recommended). If the country you picked goes down, TwitchMods switches to
+another one until it's back.
+
+**Tidier Declutter settings.** The long Declutter list is now split into
+three groups (Stream, Chat, and Feeds & Tabs), so it's easier to find what
+you're after. Your settings stay exactly as they were.
+
+**Fewer restarts.** Hiding Subscribe, Extensions, Clip, Bits and the "+" tab
+now happens the moment you flip the switch, and so does showing them again.
+Hiding the channel bar and leaderboard also happens right away (showing those
+two again still waits until you next open a stream). When a change you make
+has to wait like that, an orange "Applies the next time you open a stream"
+note shows under it until it has taken effect.
+
+**Settings fix.** The proxy status and "Skip Proxy for Channels" rows no
+longer get cut off at larger text sizes.
+
+---
+
 ## v0.1.24 — November 22, 2026
 
 **Wide emotes at full size.** With Keep Wide Emote Shape on (Settings →

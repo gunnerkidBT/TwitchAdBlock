@@ -9,4 +9,6 @@ NSURLSessionDataTask *twab_playerTaskForProxiedTask(NSURLSessionDataTask *task);
 @property (nonatomic, weak) id<NSURLSessionDelegate> inner;
 @property (nonatomic, copy) NSString *proxyUser;
 @property (nonatomic, copy) NSString *proxyPass;
+// The proxy this session goes through; task results are reported to the pool.
+@property (nonatomic, copy) NSString *proxyAddress;
 @end

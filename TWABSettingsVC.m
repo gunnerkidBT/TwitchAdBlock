@@ -3,6 +3,67 @@
 #import "SettingsKeys.h"
 #import "ChannelPoints.h"
 #import "NSURLSession+TwitchAdBlock.h"
+#import "TWABProxyPool.h"
+
+// Tweak.x: re-applies declutter switches to what is on screen now.
+extern void twab_applySettingsLive(void);
+
+// ─── "Applies the next time you open a stream" notes ───────────────────────
+// Settings that can't take effect on a stream that's already open show an
+// orange note while a change is waiting, and it clears when the next stream
+// opens. Tracked per switch: its defaults key, and whether turning it ON
+// applies live (Hide Channel Bar, Leaderboard), so only turning it off waits.
+extern NSUserDefaults *tweakDefaults;
+static NSDictionary<NSString *, NSArray *> *twab_pendingTracked(void) {
+    static NSDictionary *d;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        d = @{
+            @"AdBlockSwitch"                 : @[TWABKeyAdBlockEnabled, @NO],
+            @"ProxySwitch"                   : @[TWABKeyAdBlockProxyEnabled, @NO],
+            @"CustomProxySwitch"             : @[TWABKeyAdBlockCustomProxyEnabled, @NO],
+            @"EmotesSwitch"                  : @[TWABKeyEmotesEnabled, @NO],
+            @"HideChannelBarSwitch"          : @[TWABKeyHideChannelBar, @YES],
+            @"HideLeaderboardSwitch"         : @[TWABKeyHideLeaderboard, @YES],
+            @"HideCommunityHighlightsSwitch" : @[TWABKeyHideCommunityHighlights, @NO],
+            @"HidePinnedMessagesSwitch"      : @[TWABKeyHidePinnedMessages, @NO],
+            @"HideHypeTrainsSwitch"          : @[TWABKeyHideHypeTrains, @NO],
+            @"HidePredictionsSwitch"         : @[TWABKeyHidePredictions, @NO],
+            @"HidePollsSwitch"               : @[TWABKeyHidePolls, @NO],
+            @"HideSubGoalSwitch"             : @[TWABKeyHideSubGoal, @NO],
+            @"HideDropsSwitch"               : @[TWABKeyHideDrops, @NO],
+        };
+    });
+    return d;
+}
+
+// The value each tracked setting has on screen now (main thread only).
+static NSMutableDictionary<NSString *, NSNumber *> *twab_appliedValues;
+
+static void twab_snapshotAppliedIfNeeded(void) {
+    if (!twab_appliedValues) twab_appliedValues = [NSMutableDictionary dictionary];
+    for (NSArray *t in twab_pendingTracked().allValues) {
+        NSString *key = t[0];
+        if (!twab_appliedValues[key]) twab_appliedValues[key] = @([tweakDefaults boolForKey:key]);
+    }
+}
+
+static BOOL twab_isPending(NSString *identifier) {
+    NSArray *t = twab_pendingTracked()[identifier];
+    if (!t || !twab_appliedValues) return NO;
+    NSNumber *applied = twab_appliedValues[t[0]];
+    return applied && applied.boolValue != [tweakDefaults boolForKey:t[0]];
+}
+
+// Called from Tweak.x when a stream screen opens: everything waiting is now
+// in effect.
+void twab_settingsStreamOpened(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!twab_appliedValues) return;
+        for (NSArray *t in twab_pendingTracked().allValues)
+            twab_appliedValues[t[0]] = @([tweakDefaults boolForKey:t[0]]);
+    });
+}
 
 extern NSBundle *tweakBundle;
 extern NSUserDefaults *tweakDefaults;
@@ -104,6 +165,9 @@ extern NSArray<NSString *> *twab_pickerDiagnostics(void);
 @property (nonatomic, assign) BOOL customProxyEnabled;
 @property (nonatomic, assign) BOOL emotesEnabled;
 @property (nonatomic, assign) TWABProxyStatus proxyStatus;
+// From the last check: how many proxies answered, out of how many.
+@property (nonatomic, assign) NSUInteger proxyOnlineCount;
+@property (nonatomic, assign) NSUInteger proxyTotalCount;
 // Ordered list of custom proxies, mirroring TWABKeyAdBlockProxy (stored
 // as a newline-joined string). Each entry is one proxy address; the
 // order is the fallback order used by twab_effectiveProxyAddresses().
@@ -132,6 +196,7 @@ extern NSArray<NSString *> *twab_pickerDiagnostics(void);
         _customProxyEnabled = [tweakDefaults boolForKey:TWABKeyAdBlockCustomProxyEnabled];
         _emotesEnabled      = [tweakDefaults boolForKey:TWABKeyEmotesEnabled];
         _proxyStatus        = TWABProxyStatusUnknown;
+        twab_snapshotAppliedIfNeeded();
         [self loadProxiesFromDefaults];
     }
     return self;
@@ -219,7 +284,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
 #define TWAB_LAUNCH_OPT_COUNT (sizeof(kLaunchOpts) / sizeof(kLaunchOpts[0]))
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return 7;
+    return 9;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -233,9 +298,11 @@ static const TWABLaunchOpt kLaunchOpts[] = {
             return self.customProxyEnabled ? (3 + (NSInteger)self.proxies.count + 2) : 4;
         case 2: return [self chatRowCount];
         case 3: return 2;  // launch dropdown + watch-limit
-        case 4: return [self declutterRowCount];
-        case 5: return 3;  // Tools: export, import, diagnostics
-        case 6: return 0;  // version footer only
+        case 4:
+        case 5:
+        case 6: return (NSInteger)[self declutterRowsForSection:section].count;
+        case 7: return 3;  // Tools: export, import, diagnostics
+        case 8: return 0;  // version footer only
         default: return 0;
     }
 }
@@ -248,9 +315,11 @@ static const TWABLaunchOpt kLaunchOpts[] = {
         case 1: return self.adblockEnabled ? LOC(@"settings.section.proxy", @"Proxy") : nil;
         case 2: return LOC(@"settings.section.chat", @"Chat");
         case 3: return LOC(@"settings.section.home", @"Home & Playback");
-        case 4: return LOC(@"settings.section.declutter", @"Declutter");
-        case 5: return LOC(@"settings.section.tools", @"Tools");
-        default: return nil;  // section 6 = version footer only
+        case 4: return LOC(@"settings.section.declutter.stream", @"Declutter: Stream");
+        case 5: return LOC(@"settings.section.declutter.chat", @"Declutter: Chat");
+        case 6: return LOC(@"settings.section.declutter.feeds", @"Declutter: Feeds & Tabs");
+        case 7: return LOC(@"settings.section.tools", @"Tools");
+        default: return nil;  // section 8 = version footer only
     }
 }
 
@@ -382,155 +451,10 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                      action:@selector(disableWatchLimitSwitchChanged:)
                                  identifier:@"DisableWatchLimitSwitch"];
         case 4:
-            if (indexPath.row == 0)
-                return [self switchCellWithTitle:LOC(@"settings.hideadfree.title",
-                                                 @"Hide “Go Ad-Free” Button")
-                                    subtitle:LOC(@"settings.hideadfree.desc",
-                                                 @"Remove the Turbo upsell button from the Following tab and your profile.")
-                                         on:[tweakDefaults boolForKey:TWABKeyHideAdFreeButton]
-                                     action:@selector(hideAdFreeSwitchChanged:)
-                                 identifier:@"HideAdFreeSwitch"];
-            if (indexPath.row == 1)
-                return [self switchCellWithTitle:LOC(@"settings.hidestories.title",
-                                                     @"Hide Twitch Stories")
-                                        subtitle:LOC(@"settings.hidestories.desc",
-                                                     @"Remove the Stories strip from the Home tab.")
-                                             on:[tweakDefaults boolForKey:TWABKeyHideStories]
-                                         action:@selector(hideStoriesSwitchChanged:)
-                                     identifier:@"HideStoriesSwitch"];
-            if (indexPath.row == 2)
-                return [self switchCellWithTitle:LOC(@"settings.hiderecapsbar.title",
-                                                     @"Hide “From Channels You Follow”")
-                                        subtitle:LOC(@"settings.hiderecapsbar.desc",
-                                                     @"Remove the bar of clips and recaps from channels you follow above the live channels on the Live page.")
-                                             on:[tweakDefaults boolForKey:TWABKeyHideRecapsBar]
-                                         action:@selector(hideRecapsBarSwitchChanged:)
-                                     identifier:@"HideRecapsBarSwitch"];
-            if (indexPath.row == 3)
-                return [self switchCellWithTitle:LOC(@"settings.hidepickerbutton.title",
-                                                     @"Hide 7TV Bar")
-                                        subtitle:LOC(@"settings.hidepickerbutton.desc",
-                                                     @"Remove the 7TV bar above the keyboard when you type in chat (a 7TV button in older chat). Press and hold Twitch's emote button to open the 7TV picker instead.")
-                                             on:[tweakDefaults boolForKey:TWABKeyHidePickerButton]
-                                         action:@selector(hidePickerButtonSwitchChanged:)
-                                     identifier:@"HidePickerButtonSwitch"];
-            if (indexPath.row == 5)
-                return [self switchCellWithTitle:LOC(@"settings.hideleaderboard.title",
-                                                     @"Hide Leaderboard")
-                                        subtitle:LOC(@"settings.hideleaderboard.desc",
-                                                     @"Remove the top gifters and cheerers strip under the video. Applies the next time you open a stream.")
-                                             on:[tweakDefaults boolForKey:TWABKeyHideLeaderboard]
-                                         action:@selector(hideLeaderboardSwitchChanged:)
-                                     identifier:@"HideLeaderboardSwitch"];
-            if (indexPath.row == 6)
-                return [self switchCellWithTitle:LOC(@"settings.hidesubscribe.title",
-                                                     @"Hide Subscribe Buttons")
-                                        subtitle:LOC(@"settings.hidesubscribe.desc",
-                                                     @"Remove Subscribe and Gift a Sub under the video. Applies the next time you open a stream.")
-                                             on:[tweakDefaults boolForKey:TWABKeyHideSubscribe]
-                                         action:@selector(hideSubscribeSwitchChanged:)
-                                     identifier:@"HideSubscribeSwitch"];
-            if (indexPath.row == 7)
-                return [self switchCellWithTitle:LOC(@"settings.hidebits.title",
-                                                     @"Hide Bits Button")
-                                        subtitle:LOC(@"settings.hidebits.desc",
-                                                     @"Remove the cheering button from the chat box. Applies the next time you open a stream.")
-                                             on:[tweakDefaults boolForKey:TWABKeyHideBits]
-                                         action:@selector(hideBitsSwitchChanged:)
-                                     identifier:@"HideBitsSwitch"];
-            if (indexPath.row == 8)
-                return [self switchCellWithTitle:LOC(@"settings.hidechannelbar.title",
-                                                     @"Hide Channel Bar")
-                                        subtitle:LOC(@"settings.hidechannelbar.desc",
-                                                     @"Remove the bar under the video so chat gets the space. Tap the video to see the channel info and buttons. Applies the next time you open a stream.")
-                                             on:[tweakDefaults boolForKey:TWABKeyHideChannelBar]
-                                         action:@selector(hideChannelBarSwitchChanged:)
-                                     identifier:@"HideChannelBarSwitch"];
-            if (indexPath.row == 9)
-                return [self switchCellWithTitle:LOC(@"settings.hideextensions.title",
-                                                     @"Hide Extensions Button")
-                                        subtitle:LOC(@"settings.hideextensions.desc",
-                                                     @"Remove the button for channel extensions, like viewer maps. Applies the next time you open a stream.")
-                                             on:[tweakDefaults boolForKey:TWABKeyHideExtensions]
-                                         action:@selector(hideExtensionsSwitchChanged:)
-                                     identifier:@"HideExtensionsSwitch"];
-            if (indexPath.row == 10)
-                return [self switchCellWithTitle:LOC(@"settings.hidecommunity.title",
-                                                     @"Hide Community Highlights")
-                                        subtitle:LOC(@"settings.hidecommunity.desc",
-                                                     @"Remove community highlight banners above chat (pinned messages, hype trains, predictions, polls, sub goals, drops). Applies the next time you open a stream.")
-                                             on:[tweakDefaults boolForKey:TWABKeyHideCommunityHighlights]
-                                         action:@selector(hideCommunityHighlightsSwitchChanged:)
-                                     identifier:@"HideCommunityHighlightsSwitch"];
-            if ([tweakDefaults boolForKey:TWABKeyHideCommunityHighlights]) {
-                if (indexPath.row == 11)
-                    return [self switchCellWithTitle:LOC(@"settings.hidepinnedmessages.title",
-                                                         @"Pinned Messages")
-                                            subtitle:LOC(@"settings.hidepinnedmessages.desc",
-                                                         @"Hide mod-pinned messages above chat.")
-                                                 on:[tweakDefaults boolForKey:TWABKeyHidePinnedMessages]
-                                             action:@selector(hidePinnedMessagesSwitchChanged:)
-                                         identifier:@"HidePinnedMessagesSwitch"];
-                if (indexPath.row == 12)
-                    return [self switchCellWithTitle:LOC(@"settings.hidehypetrains.title",
-                                                         @"Hype Trains")
-                                            subtitle:LOC(@"settings.hidehypetrains.desc",
-                                                         @"Hide hype train banners above chat.")
-                                                 on:[tweakDefaults boolForKey:TWABKeyHideHypeTrains]
-                                             action:@selector(hideHypeTrainsSwitchChanged:)
-                                         identifier:@"HideHypeTrainsSwitch"];
-                if (indexPath.row == 13)
-                    return [self switchCellWithTitle:LOC(@"settings.hidepredictions.title",
-                                                         @"Predictions")
-                                            subtitle:LOC(@"settings.hidepredictions.desc",
-                                                         @"Hide prediction banners above chat.")
-                                                 on:[tweakDefaults boolForKey:TWABKeyHidePredictions]
-                                             action:@selector(hidePredictionsSwitchChanged:)
-                                         identifier:@"HidePredictionsSwitch"];
-                if (indexPath.row == 14)
-                    return [self switchCellWithTitle:LOC(@"settings.hidepolls.title",
-                                                         @"Polls")
-                                            subtitle:LOC(@"settings.hidepolls.desc",
-                                                         @"Hide poll banners above chat.")
-                                                 on:[tweakDefaults boolForKey:TWABKeyHidePolls]
-                                             action:@selector(hidePollsSwitchChanged:)
-                                         identifier:@"HidePollsSwitch"];
-                if (indexPath.row == 15)
-                    return [self switchCellWithTitle:LOC(@"settings.hidesubgoal.title",
-                                                         @"Sub Goal")
-                                            subtitle:LOC(@"settings.hidesubgoal.desc",
-                                                         @"Hide the subscription goal progress bar above chat.")
-                                                 on:[tweakDefaults boolForKey:TWABKeyHideSubGoal]
-                                             action:@selector(hideSubGoalSwitchChanged:)
-                                         identifier:@"HideSubGoalSwitch"];
-                if (indexPath.row == 16)
-                    return [self switchCellWithTitle:LOC(@"settings.hidedrops.title",
-                                                         @"Drops")
-                                            subtitle:LOC(@"settings.hidedrops.desc",
-                                                         @"Hide Twitch Drops campaign notifications above chat.")
-                                                 on:[tweakDefaults boolForKey:TWABKeyHideDrops]
-                                             action:@selector(hideDropsSwitchChanged:)
-                                         identifier:@"HideDropsSwitch"];
-            }
-            {
-                NSInteger clipRow = [tweakDefaults boolForKey:TWABKeyHideCommunityHighlights] ? 17 : 11;
-                if (indexPath.row == clipRow)
-                    return [self switchCellWithTitle:LOC(@"settings.hideclipbutton.title",
-                                                         @"Hide Clip Button")
-                                            subtitle:LOC(@"settings.hideclipbutton.desc",
-                                                         @"Remove the clip button from the player controls. Applies the next time you open a stream.")
-                                                 on:[tweakDefaults boolForKey:TWABKeyHideClipButton]
-                                             action:@selector(hideClipButtonSwitchChanged:)
-                                         identifier:@"HideClipButtonSwitch"];
-            }
-            return [self switchCellWithTitle:LOC(@"settings.hidecreatetab.title",
-                                                 @"Hide “+” (Create) Button")
-                                    subtitle:LOC(@"settings.hidecreatetab.desc",
-                                                 @"Remove the Create button from the middle of the bottom tab bar. Applies the next time Twitch opens.")
-                                         on:[tweakDefaults boolForKey:TWABKeyHideCreateTab]
-                                     action:@selector(hideCreateTabSwitchChanged:)
-                                 identifier:@"HideCreateTabSwitch"];
         case 5:
+        case 6:
+            return [self declutterCellNamed:[self declutterRowsForSection:indexPath.section][indexPath.row]];
+        case 7:
             if (indexPath.row == 0)
                 return [self actionCellWithTitle:LOC(@"settings.tools.export", @"Export Settings")
                                         subtitle:LOC(@"settings.tools.export.desc",
@@ -597,6 +521,11 @@ static const TWABLaunchOpt kLaunchOpts[] = {
         return;
     }
     if (indexPath.section == 1 && self.adblockEnabled && self.proxyEnabled &&
+        !self.customProxyEnabled && indexPath.row == [self statusRowIndex]) {
+        [self presentDefaultProxyPicker:[tableView cellForRowAtIndexPath:indexPath]];
+        return;
+    }
+    if (indexPath.section == 1 && self.adblockEnabled && self.proxyEnabled &&
         self.customProxyEnabled && indexPath.row == [self addProxyRowIndex]) {
         [self.proxies addObject:@""];
         [self saveProxiesToDefaults];
@@ -612,7 +541,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
         [self presentLaunchScreenPicker:[tableView cellForRowAtIndexPath:indexPath]];
         return;
     }
-    if (indexPath.section == 5) {
+    if (indexPath.section == 7) {
         if (indexPath.row == 0)
             [self exportSettings:[tableView cellForRowAtIndexPath:indexPath]];
         else if (indexPath.row == 1)
@@ -730,7 +659,7 @@ static const char *kPinnedDismissTitles[] = { "Never", "5 seconds", "10 seconds"
                                                   style:UIAlertActionStyleDefault
                                                 handler:^(UIAlertAction *_) {
             [tweakDefaults setInteger:seconds forKey:TWABKeyDismissPinnedSeconds];
-            [weakSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:4]
+            [weakSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:5]
                               withRowAnimation:UITableViewRowAnimationNone];
         }]];
     }
@@ -763,7 +692,24 @@ static const NSInteger kProxyTextFieldTag = 0xABCD;
         sw = [[UISwitch alloc] init];
         sw.accessibilityIdentifier = identifier;
         [sw addTarget:self action:action forControlEvents:UIControlEventValueChanged];
+        if (twab_pendingTracked()[identifier])
+            [sw addTarget:self action:@selector(trackedSwitchToggled:)
+                forControlEvents:UIControlEventValueChanged];
         cell.accessoryView = sw;
+    }
+    // A change that can't apply to the open stream gets an orange note.
+    NSAttributedString *pendingSubtitle = nil;
+    if (twab_isPending(identifier)) {
+        NSMutableAttributedString *s = [[NSMutableAttributedString alloc]
+            initWithString:subtitle ?: @""
+                attributes:@{ NSFontAttributeName : [UIFont systemFontOfSize:12],
+                              NSForegroundColorAttributeName : [UIColor secondaryLabelColor] }];
+        NSString *note = LOC(@"settings.pending.stream", @"Applies the next time you open a stream");
+        [s appendAttributedString:[[NSAttributedString alloc]
+            initWithString:[NSString stringWithFormat:@"%@%@", s.length ? @"\n" : @"", note]
+                attributes:@{ NSFontAttributeName : [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold],
+                              NSForegroundColorAttributeName : [UIColor systemOrangeColor] }]];
+        pendingSubtitle = s;
     }
     // iOS 14+ ignores textLabel in favour of content configurations.
     // Use respondsToSelector: so we avoid @available (which crashes in sideloaded dylibs).
@@ -776,16 +722,35 @@ static const NSInteger kProxyTextFieldTag = 0xABCD;
         cfg.secondaryTextProperties.color = [UIColor secondaryLabelColor];
         cfg.secondaryTextProperties.font = [UIFont systemFontOfSize:12];
         cfg.textToSecondaryTextVerticalPadding = 2;
+        if (pendingSubtitle) cfg.secondaryAttributedText = pendingSubtitle;
         [cell setContentConfiguration:cfg];
 #pragma clang diagnostic pop
     } else {
         cell.textLabel.text = title;
-        cell.detailTextLabel.text = subtitle;
         cell.detailTextLabel.numberOfLines = 0;
         cell.detailTextLabel.textColor = [UIColor grayColor];
+        if (pendingSubtitle) cell.detailTextLabel.attributedText = pendingSubtitle;
+        else cell.detailTextLabel.text = subtitle;
     }
     sw.on = on;
     return cell;
+}
+
+// Runs after a tracked switch's own handler: turning on a setting that
+// applies live (channel bar, leaderboard) counts as applied; then the row is
+// redrawn to show or clear its note.
+- (void)trackedSwitchToggled:(UISwitch *)sw {
+    NSArray *t = twab_pendingTracked()[sw.accessibilityIdentifier];
+    if (!t) return;
+    if (sw.on && [t[1] boolValue]) twab_appliedValues[t[0]] = @YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UITableView *tv = weakSelf.tableView;
+        UIView *v = sw;
+        while (v && ![v isKindOfClass:UITableViewCell.class]) v = v.superview;
+        NSIndexPath *ip = v ? [tv indexPathForCell:(UITableViewCell *)v] : nil;
+        if (ip) [tv reloadRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationNone];
+    });
 }
 
 // Slider row: title + value% on top, subtitle below, slider at the bottom.
@@ -839,12 +804,26 @@ static const NSInteger kProxyTextFieldTag = 0xABCD;
     NSString *title = self.customProxyEnabled
         ? LOC(@"settings.proxy.custom_status", @"Custom proxy")
         : LOC(@"settings.proxy.default_status", @"Default proxy");
+    // The built-in proxy can be chosen by country (tap the row).
+    if (!self.customProxyEnabled) {
+        NSString *chosen = [tweakDefaults stringForKey:TWABKeyPreferredProxy];
+        title = [NSString stringWithFormat:@"%@: %@", title,
+                 chosen.length ? chosen : LOC(@"settings.proxy.automatic", @"Automatic")];
+    }
+    cell.selectionStyle = self.customProxyEnabled ? UITableViewCellSelectionStyleNone
+                                                  : UITableViewCellSelectionStyleDefault;
+    cell.accessoryType = self.customProxyEnabled ? UITableViewCellAccessoryNone
+                                                 : UITableViewCellAccessoryDisclosureIndicator;
     NSString *detail;
     UIColor *color;
     switch (self.proxyStatus) {
         case TWABProxyStatusOnline:
             detail = LOC(@"settings.proxy.status.online", @"● Online");
-            color  = [UIColor systemGreenColor];
+            if (self.proxyTotalCount > 1)
+                detail = [NSString stringWithFormat:@"%@ (%lu/%lu)", detail,
+                          (unsigned long)self.proxyOnlineCount, (unsigned long)self.proxyTotalCount];
+            color  = self.proxyOnlineCount < self.proxyTotalCount ? [UIColor systemOrangeColor]
+                                                                 : [UIColor systemGreenColor];
             break;
         case TWABProxyStatusOffline:
             detail = LOC(@"settings.proxy.status.offline", @"● Offline");
@@ -875,6 +854,50 @@ static const NSInteger kProxyTextFieldTag = 0xABCD;
         cell.detailTextLabel.textColor = color;
     }
     return cell;
+}
+
+// Pick the built-in proxy by country, or Automatic. A choice is a
+// preference: if that proxy is down, the app still uses another one.
+- (void)presentDefaultProxyPicker:(UIView *)anchor {
+    NSArray<NSString *> *names = twab_defaultProxyNames();
+    NSArray<NSString *> *addresses = twab_effectiveProxyAddresses();
+    NSString *chosen = [tweakDefaults stringForKey:TWABKeyPreferredProxy] ?: @"";
+    UIAlertController *sheet = [UIAlertController
+        alertControllerWithTitle:LOC(@"settings.proxy.pick.title", @"Default Proxy")
+                         message:LOC(@"settings.proxy.pick.desc",
+                                     @"Automatic spreads streams over the servers that work best "
+                                     @"for you. If you pick a country and it goes down, the app "
+                                     @"switches to another one until it's back.")
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    void (^choose)(NSString *) = ^(NSString *name) {
+        if (name.length) [tweakDefaults setObject:name forKey:TWABKeyPreferredProxy];
+        else [tweakDefaults removeObjectForKey:TWABKeyPreferredProxy];
+        twab_proxyPoolResetPick();
+        [weakSelf reloadStatusRow];
+    };
+    NSString *autoTitle = LOC(@"settings.proxy.automatic.recommended", @"Automatic (recommended)");
+    if (!chosen.length) autoTitle = [@"✓  " stringByAppendingString:autoTitle];
+    [sheet addAction:[UIAlertAction actionWithTitle:autoTitle style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *_) { choose(nil); }]];
+    for (NSUInteger i = 0; i < names.count && i < addresses.count; i++) {
+        NSString *name = names[i];
+        NSDictionary *info = twab_proxyPoolInfo(addresses[i]);
+        NSString *state;
+        if (!info[@"up"]) state = LOC(@"settings.proxy.status.notchecked", @"Not checked yet");
+        else if (![info[@"up"] boolValue] || [info[@"benched"] boolValue])
+            state = LOC(@"settings.proxy.status.offline.plain", @"Offline");
+        else state = [NSString stringWithFormat:@"%.0f ms", [info[@"latencyMs"] doubleValue]];
+        NSString *title = [NSString stringWithFormat:@"%@ · %@", name, state];
+        if ([chosen isEqualToString:name]) title = [@"✓  " stringByAppendingString:title];
+        [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *_) { choose(name); }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:LOC(@"settings.launch.cancel", @"Cancel")
+                                              style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = anchor;
+    sheet.popoverPresentationController.sourceRect = anchor.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 - (UITableViewCell *)proxyWhitelistCell {
@@ -1056,7 +1079,7 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 #pragma mark - UITableViewDelegate (footers)
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
-    if (section == 6) {
+    if (section == 8) {
         UIView *wrap = [[UIView alloc] init];
 
         UIButton *kofi = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -1093,10 +1116,14 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     NSString *text = nil;
     if (section == 1 && self.adblockEnabled && self.proxyEnabled && self.customProxyEnabled) {
         text = LOC(@"settings.proxy.footer.multi",
-                   @"Proxies are tried in order. The first to respond 200 to /ping rewrites "
-                   @"playlists (V2 / ttv-lol-pro format). Otherwise the first valid proxy "
-                   @"tunnels them via HTTP CONNECT. Use ↑↓ to reorder, swipe a "
-                   @"row to delete.");
+                   @"With more than one proxy, the app checks them in the background, "
+                   @"spreads streams over the ones that work and switches if one goes "
+                   @"down. A V2 / ttv-lol-pro proxy is used first if listed. Use ↑↓ to "
+                   @"reorder, swipe a row to delete.");
+    } else if (section == 4) {
+        text = LOC(@"settings.declutter.stream.footer",
+                   @"These apply in the channel bar, or in the info panel (tap the video) "
+                   @"when the channel bar is hidden.");
     } else {
         return nil;
     }
@@ -1121,8 +1148,9 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     // Collapse footers for sections that no longer have one (their
     // descriptions moved to per-row subtitles), otherwise grouped style
-    // leaves an empty gap. Section 6 = version, section 1 = proxy mechanics.
-    BOOL hasFooter = (section == 6) ||
+    // leaves an empty gap. Section 8 = version, section 4 = where the stream
+    // buttons go with the channel bar hidden, section 1 = proxy mechanics.
+    BOOL hasFooter = (section == 8) || (section == 4) ||
         (section == 1 && self.adblockEnabled && self.proxyEnabled && self.customProxyEnabled);
     return hasFooter ? UITableViewAutomaticDimension : CGFLOAT_MIN;
 }
@@ -1132,7 +1160,10 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 // don't pin top/bottom, so self-sizing would collapse them. They keep a
 // fixed height. Toggles, action rows, and the launch dropdown all self-size.
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section == 1 && indexPath.row >= 2) return 44.0;
+    // The status and Skip Proxy rows use the standard content layout, so they
+    // size to the text (a fixed 44pt cut off descenders at larger text sizes).
+    if (indexPath.section == 1 && indexPath.row >= 2 &&
+        indexPath.row < [self statusRowIndex]) return 44.0;
     if (indexPath.section == 2) {
         NSInteger emoteRow = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 5 : 4;
         NSInteger textRow = emoteRow + 1;
@@ -1173,10 +1204,61 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     return base + 2; // emote size + text size selectors
 }
 
-// Section 4 row count. Base: 12 fixed rows (go ad-free through clip button).
-// When "Hide Community Highlights" is on, 6 extra rows appear (sub-toggles).
-- (NSInteger)declutterRowCount {
-    return [tweakDefaults boolForKey:TWABKeyHideCommunityHighlights] ? 18 : 12;
+// Declutter rows, grouped by where each item shows up. Names map to cells in
+// declutterCellNamed:. Community Highlights' sub-options appear under it
+// while it's on.
+- (NSArray<NSString *> *)declutterRowsForSection:(NSInteger)section {
+    switch (section) {
+        case 4: return @[@"channelbar", @"subscribe", @"extensions", @"leaderboard", @"clip"];
+        case 5: {
+            NSMutableArray *rows = [@[@"bits", @"picker", @"community"] mutableCopy];
+            if ([tweakDefaults boolForKey:TWABKeyHideCommunityHighlights])
+                [rows addObjectsFromArray:@[@"pinned", @"hypetrains", @"predictions", @"polls", @"subgoal", @"drops"]];
+            return rows;
+        }
+        case 6: return @[@"adfree", @"stories", @"recaps", @"createtab"];
+        default: return @[];
+    }
+}
+
+- (UITableViewCell *)declutterCellNamed:(NSString *)name {
+    if ([name isEqualToString:@"channelbar"])
+        return [self switchCellWithTitle:LOC(@"settings.hidechannelbar.title", @"Hide Channel Bar") subtitle:LOC(@"settings.hidechannelbar.desc", @"Remove the bar under the video so chat gets the space. Tap the video to see the channel info and buttons.") on:[tweakDefaults boolForKey:TWABKeyHideChannelBar] action:@selector(hideChannelBarSwitchChanged:) identifier:@"HideChannelBarSwitch"];
+    if ([name isEqualToString:@"subscribe"])
+        return [self switchCellWithTitle:LOC(@"settings.hidesubscribe.title", @"Hide Subscribe Buttons") subtitle:LOC(@"settings.hidesubscribe.desc", @"Remove Subscribe and Gift a Sub under the video.") on:[tweakDefaults boolForKey:TWABKeyHideSubscribe] action:@selector(hideSubscribeSwitchChanged:) identifier:@"HideSubscribeSwitch"];
+    if ([name isEqualToString:@"extensions"])
+        return [self switchCellWithTitle:LOC(@"settings.hideextensions.title", @"Hide Extensions Button") subtitle:LOC(@"settings.hideextensions.desc", @"Remove the button for channel extensions, like viewer maps.") on:[tweakDefaults boolForKey:TWABKeyHideExtensions] action:@selector(hideExtensionsSwitchChanged:) identifier:@"HideExtensionsSwitch"];
+    if ([name isEqualToString:@"leaderboard"])
+        return [self switchCellWithTitle:LOC(@"settings.hideleaderboard.title", @"Hide Leaderboard") subtitle:LOC(@"settings.hideleaderboard.desc", @"Remove the top gifters and cheerers strip under the video.") on:[tweakDefaults boolForKey:TWABKeyHideLeaderboard] action:@selector(hideLeaderboardSwitchChanged:) identifier:@"HideLeaderboardSwitch"];
+    if ([name isEqualToString:@"clip"])
+        return [self switchCellWithTitle:LOC(@"settings.hideclipbutton.title", @"Hide Clip Button") subtitle:LOC(@"settings.hideclipbutton.desc", @"Remove the clip button from the player controls.") on:[tweakDefaults boolForKey:TWABKeyHideClipButton] action:@selector(hideClipButtonSwitchChanged:) identifier:@"HideClipButtonSwitch"];
+    if ([name isEqualToString:@"bits"])
+        return [self switchCellWithTitle:LOC(@"settings.hidebits.title", @"Hide Bits Button") subtitle:LOC(@"settings.hidebits.desc", @"Remove the cheering button from the chat box.") on:[tweakDefaults boolForKey:TWABKeyHideBits] action:@selector(hideBitsSwitchChanged:) identifier:@"HideBitsSwitch"];
+    if ([name isEqualToString:@"picker"])
+        return [self switchCellWithTitle:LOC(@"settings.hidepickerbutton.title", @"Hide 7TV Bar") subtitle:LOC(@"settings.hidepickerbutton.desc", @"Remove the 7TV bar above the keyboard when you type in chat (a 7TV button in older chat). Press and hold Twitch's emote button to open the 7TV picker instead.") on:[tweakDefaults boolForKey:TWABKeyHidePickerButton] action:@selector(hidePickerButtonSwitchChanged:) identifier:@"HidePickerButtonSwitch"];
+    if ([name isEqualToString:@"community"])
+        return [self switchCellWithTitle:LOC(@"settings.hidecommunity.title", @"Hide Community Highlights") subtitle:LOC(@"settings.hidecommunity.desc", @"Remove community highlight banners above chat (pinned messages, hype trains, predictions, polls, sub goals, drops).") on:[tweakDefaults boolForKey:TWABKeyHideCommunityHighlights] action:@selector(hideCommunityHighlightsSwitchChanged:) identifier:@"HideCommunityHighlightsSwitch"];
+    if ([name isEqualToString:@"pinned"])
+        return [self switchCellWithTitle:LOC(@"settings.hidepinnedmessages.title", @"Pinned Messages") subtitle:LOC(@"settings.hidepinnedmessages.desc", @"Hide mod-pinned messages above chat.") on:[tweakDefaults boolForKey:TWABKeyHidePinnedMessages] action:@selector(hidePinnedMessagesSwitchChanged:) identifier:@"HidePinnedMessagesSwitch"];
+    if ([name isEqualToString:@"hypetrains"])
+        return [self switchCellWithTitle:LOC(@"settings.hidehypetrains.title", @"Hype Trains") subtitle:LOC(@"settings.hidehypetrains.desc", @"Hide hype train banners above chat.") on:[tweakDefaults boolForKey:TWABKeyHideHypeTrains] action:@selector(hideHypeTrainsSwitchChanged:) identifier:@"HideHypeTrainsSwitch"];
+    if ([name isEqualToString:@"predictions"])
+        return [self switchCellWithTitle:LOC(@"settings.hidepredictions.title", @"Predictions") subtitle:LOC(@"settings.hidepredictions.desc", @"Hide prediction banners above chat.") on:[tweakDefaults boolForKey:TWABKeyHidePredictions] action:@selector(hidePredictionsSwitchChanged:) identifier:@"HidePredictionsSwitch"];
+    if ([name isEqualToString:@"polls"])
+        return [self switchCellWithTitle:LOC(@"settings.hidepolls.title", @"Polls") subtitle:LOC(@"settings.hidepolls.desc", @"Hide poll banners above chat.") on:[tweakDefaults boolForKey:TWABKeyHidePolls] action:@selector(hidePollsSwitchChanged:) identifier:@"HidePollsSwitch"];
+    if ([name isEqualToString:@"subgoal"])
+        return [self switchCellWithTitle:LOC(@"settings.hidesubgoal.title", @"Sub Goal") subtitle:LOC(@"settings.hidesubgoal.desc", @"Hide the subscription goal progress bar above chat.") on:[tweakDefaults boolForKey:TWABKeyHideSubGoal] action:@selector(hideSubGoalSwitchChanged:) identifier:@"HideSubGoalSwitch"];
+    if ([name isEqualToString:@"drops"])
+        return [self switchCellWithTitle:LOC(@"settings.hidedrops.title", @"Drops") subtitle:LOC(@"settings.hidedrops.desc", @"Hide Twitch Drops campaign notifications above chat.") on:[tweakDefaults boolForKey:TWABKeyHideDrops] action:@selector(hideDropsSwitchChanged:) identifier:@"HideDropsSwitch"];
+    if ([name isEqualToString:@"adfree"])
+        return [self switchCellWithTitle:LOC(@"settings.hideadfree.title", @"Hide “Go Ad-Free” Button") subtitle:LOC(@"settings.hideadfree.desc", @"Remove the Turbo upsell button from the Following tab and your profile.") on:[tweakDefaults boolForKey:TWABKeyHideAdFreeButton] action:@selector(hideAdFreeSwitchChanged:) identifier:@"HideAdFreeSwitch"];
+    if ([name isEqualToString:@"stories"])
+        return [self switchCellWithTitle:LOC(@"settings.hidestories.title", @"Hide Twitch Stories") subtitle:LOC(@"settings.hidestories.desc", @"Remove the Stories strip from the Home tab.") on:[tweakDefaults boolForKey:TWABKeyHideStories] action:@selector(hideStoriesSwitchChanged:) identifier:@"HideStoriesSwitch"];
+    if ([name isEqualToString:@"recaps"])
+        return [self switchCellWithTitle:LOC(@"settings.hiderecapsbar.title", @"Hide “From Channels You Follow”") subtitle:LOC(@"settings.hiderecapsbar.desc", @"Remove the bar of clips and recaps from channels you follow above the live channels on the Live page.") on:[tweakDefaults boolForKey:TWABKeyHideRecapsBar] action:@selector(hideRecapsBarSwitchChanged:) identifier:@"HideRecapsBarSwitch"];
+    if ([name isEqualToString:@"createtab"])
+        return [self switchCellWithTitle:LOC(@"settings.hidecreatetab.title", @"Hide “+” (Create) Button") subtitle:LOC(@"settings.hidecreatetab.desc", @"Remove the Create button from the middle of the bottom tab bar.") on:[tweakDefaults boolForKey:TWABKeyHideCreateTab] action:@selector(hideCreateTabSwitchChanged:) identifier:@"HideCreateTabSwitch"];
+    return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
 }
 
 - (void)keepDeletedSwitchChanged:(UISwitch *)sw {
@@ -1189,26 +1271,32 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 
 - (void)hideCreateTabSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideCreateTab];
+    twab_applySettingsLive();
 }
 
 - (void)hideLeaderboardSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideLeaderboard];
+    twab_applySettingsLive();
 }
 
 - (void)hideSubscribeSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideSubscribe];
+    twab_applySettingsLive();
 }
 
 - (void)hideChannelBarSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideChannelBar];
+    twab_applySettingsLive();
 }
 
 - (void)hideExtensionsSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideExtensions];
+    twab_applySettingsLive();
 }
 
 - (void)hideBitsSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideBits];
+    twab_applySettingsLive();
 }
 
 - (void)hideSubGoalSwitchChanged:(UISwitch *)sw {
@@ -1232,7 +1320,7 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
         if (![tweakDefaults objectForKey:TWABKeyHideDrops])
             [tweakDefaults setBool:YES forKey:TWABKeyHideDrops];
     }
-    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:4]
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:5]
                   withRowAnimation:UITableViewRowAnimationAutomatic];
 }
 
@@ -1258,6 +1346,7 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 
 - (void)hideClipButtonSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideClipButton];
+    twab_applySettingsLive();
 }
 
 - (void)fitWideEmotesSwitchChanged:(UISwitch *)sw {
@@ -1381,7 +1470,8 @@ static NSArray<NSString *> *twab_exportKeys(void) {
               TWABKeyHideClipButton, TWABKeyAutoClaimPoints,
               TWABKeyProxyWhitelist,
               TWABKeyChatEmoteScale,
-              TWABKeyChatTextScale ];
+              TWABKeyChatTextScale,
+              TWABKeyPreferredProxy ];
 }
 
 - (void)openKofi {
@@ -1546,32 +1636,23 @@ static NSArray<NSString *> *twab_exportKeys(void) {
 
 - (void)refreshProxyStatus {
     if (!self.proxyEnabled) return;
-    NSString *addr;
-    if (self.customProxyEnabled) {
-        // Probe the first non-empty configured proxy. The actual
-        // routing iterates the full list at request time; this status
-        // indicator just gives a "is anything online?" smoke test.
-        addr = nil;
-        for (NSString *p in self.proxies) {
-            NSString *t = [p stringByTrimmingCharactersInSet:
-                [NSCharacterSet whitespaceCharacterSet]];
-            if (t.length) { addr = t; break; }
-        }
-        if (!addr) {
-            self.proxyStatus = TWABProxyStatusOffline;
-            [self reloadStatusRow];
-            return;
-        }
-    } else {
-        addr = PROXY_ADDR;
+    // Check every configured proxy (a real request to Twitch through each).
+    // The result also feeds the pool that picks which proxy streams use.
+    NSArray<NSString *> *addrs = twab_effectiveProxyAddresses();
+    if (!addrs.count) {
+        self.proxyStatus = TWABProxyStatusOffline;
+        [self reloadStatusRow];
+        return;
     }
     self.proxyStatus = TWABProxyStatusChecking;
     [self reloadStatusRow];
     __weak typeof(self) weakSelf = self;
-    twab_checkProxyStatus(addr, ^(TWABProxyStatus s) {
+    twab_proxyPoolCheckNow(addrs, ^(NSUInteger online, NSUInteger total) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
-        strongSelf.proxyStatus = s;
+        strongSelf.proxyOnlineCount = online;
+        strongSelf.proxyTotalCount = total;
+        strongSelf.proxyStatus = online ? TWABProxyStatusOnline : TWABProxyStatusOffline;
         [strongSelf reloadStatusRow];
     });
 }

@@ -7,6 +7,7 @@
 #import "Tweak.h"
 #import "SettingsKeys.h"
 #import "ChannelPoints.h"
+#import "TWABProxyPool.h"
 
 NSBundle *tweakBundle;
 NSUserDefaults *tweakDefaults;
@@ -279,12 +280,11 @@ void twab_checkPlaylistForAds(NSData *data, NSURLRequest *request) {
   components.scheme = @"https";
   NSMutableURLRequest *request = loadingRequest.request.mutableCopy;
   request.URL = components.URL;
-  NSString *proxy = [tweakDefaults boolForKey:TWABKeyAdBlockCustomProxyEnabled]
-                        ? [tweakDefaults stringForKey:TWABKeyAdBlockProxy]
-                        : PROXY_ADDR;
+  NSString *proxy = twab_proxyPoolPick(twab_effectiveProxyAddresses());
   NSURLSession *session = [[NSURLSession alloc] twab_proxySessionWithAddress:proxy];
   [[session dataTaskWithRequest:request
               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                twab_proxyPoolReportResult(proxy, error);
                 if (error) return [loadingRequest finishLoadingWithError:error];
                 loadingRequest.contentInformationRequest.contentType = AVFileTypeMPEG4;
                 [dataRequest respondWithData:data];
@@ -969,6 +969,35 @@ static BOOL twab_shouldHideTestID(NSString *testID) {
 
 // Sub goal views are standalone banners above chat — hidden + removeFromSuperview
 // so they don't leave a white box.
+// The chat box's buttons (Bits) are hidden in place. If the named view turns
+// out to hold the text field or be much bigger than a button (Twitch 32.2's
+// chat input layout), hiding it would blank the chat box, so it's left shown.
+static BOOL twab_containsChatInput(UIView *view, int depth) {
+  static Class inputCls;
+  if (!inputCls) inputCls = objc_getClass("_TtC21twitch_rn_emote_input20TwitchEmoteInputView");
+  if (inputCls && [view isKindOfClass:inputCls]) return YES;
+  if (depth <= 0) return NO;
+  for (UIView *sub in view.subviews)
+    if (twab_containsChatInput(sub, depth - 1)) return YES;
+  return NO;
+}
+
+static BOOL twab_isSafeChatButton(UIView *view, NSString *testID) {
+  if (![testID hasPrefix:@"chat-tray-button-"]) return YES;
+  CGSize s = view.bounds.size;
+  BOOL big = s.width > 80 || s.height > 80;
+  BOOL hasInput = twab_containsChatInput(view, 8);
+  static int logs;
+  if (logs < 12 && (s.width > 0 || hasInput)) {
+    logs++;
+    os_log(OS_LOG_DEFAULT,
+        "[TWAB-Hide] %{public}@ size=%.0fx%.0f subviews=%lu parent=%{public}@ input=%d",
+        testID, s.width, s.height, (unsigned long)view.subviews.count,
+        view.superview.accessibilityIdentifier ?: NSStringFromClass(view.superview.class), hasInput);
+  }
+  return !big && !hasInput;
+}
+
 static BOOL twab_shouldRemoveTestID(NSString *testID) {
   if ([testID hasPrefix:@"highlight-creator-goal"] ||
       [testID hasPrefix:@"chat-sub-goal"] ||
@@ -1032,6 +1061,24 @@ static void twab_moveAboveChat(UIView *view, CGFloat shift) {
                            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+// Hide Channel Bar: the message scroller's mask lets rows draw up into the
+// bar's space but not below the scroller. A scroller's layer coordinates
+// move with its content offset, so the mask is re-placed on every layout pass
+// (which runs on every scroll).
+static char twab_scrollMaskKey;
+static void twab_updateScrollMask(UIScrollView *scroll) {
+  CALayer *m = objc_getAssociatedObject(scroll, &twab_scrollMaskKey);
+  CGFloat extra = [objc_getAssociatedObject(scroll, &twab_touchExtensionKey) doubleValue];
+  if (!m) return;
+  CGRect b = scroll.bounds;
+  CGRect f = CGRectMake(b.origin.x, b.origin.y - extra, b.size.width, b.size.height + extra);
+  if (CGRectEqualToRect(m.frame, f)) return;
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  m.frame = f;
+  [CATransaction commit];
+}
+
 static void twab_collapseChannelBar(UIView *changed) {
   UIView *layout = changed.superview;
   while (layout && ![layout.accessibilityIdentifier isEqualToString:@"theatre-portrait-layout"])
@@ -1071,6 +1118,38 @@ static void twab_collapseChannelBar(UIView *changed) {
     mask.backgroundColor = UIColor.whiteColor.CGColor;
     region.layer.mask = mask;
     os_log(OS_LOG_DEFAULT, "[TWAB-Hide] chat drawing into channel bar space, bar height %.0f", height);
+  }
+  // The message scroller is unclipped so its rows can draw up into the bar's
+  // space, but they must never draw below its bottom edge: that's the chat
+  // box, and while the box grows to two lines the rows covered it ("chat box
+  // goes blank", Twitch 32.2). The mask goes on the scroller, not the list,
+  // because the channel points button lives in the list and would be cut off.
+  BOOL masked = NO;
+  for (UIView *sub in list.subviews) {
+    if (![sub isKindOfClass:UIScrollView.class]) continue;
+    if (!objc_getAssociatedObject(sub, &twab_scrollMaskKey)) {
+      CALayer *m = [CALayer layer];
+      m.backgroundColor = UIColor.whiteColor.CGColor;
+      sub.layer.mask = m;
+      objc_setAssociatedObject(sub, &twab_scrollMaskKey, m, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    twab_updateScrollMask((UIScrollView *)sub);
+    masked = YES;
+  }
+  static BOOL warned;
+  if (!masked && !warned) {
+    warned = YES;
+    os_log(OS_LOG_DEFAULT, "[TWAB-Box] no message scroller under chat-message-list; rows not masked");
+  }
+  CGRect lb = list.bounds;
+  static int boxLogs;
+  static CGFloat lastListH;
+  if (boxLogs < 20 && fabs(lb.size.height - lastListH) >= 1) {
+    boxLogs++;
+    lastListH = lb.size.height;
+    CGRect lw = [list convertRect:lb toView:nil], rw = [region convertRect:region.bounds toView:nil];
+    os_log(OS_LOG_DEFAULT, "[TWAB-Box] list y=%.0f-%.0f region y=%.0f-%.0f bar=%.0f",
+           CGRectGetMinY(lw), CGRectGetMaxY(lw), CGRectGetMinY(rw), CGRectGetMaxY(rw), height);
   }
   [CATransaction begin];
   [CATransaction setDisableActions:YES];
@@ -1279,12 +1358,93 @@ static BOOL twab_isInsideChatMessageList(UIView *view) {
   return NO;
 }
 
+// Lets a grown emote draw past its row by unclipping the views between it
+// and the chat list. Never touches the list or anything above it: unclipped,
+// its rows draw over the chat box while the box resizes ("chat box goes
+// blank"). An emote that isn't inside the list is left alone entirely, so a
+// changed view layout in a Twitch update can't unclip the whole screen.
+static void twab_unclipToChatList(UIView *view) {
+  static int dumps;
+  if (!twab_isInsideChatMessageList(view)) {
+    if (dumps < 3) {
+      dumps++;
+      NSMutableString *chain = [NSMutableString string];
+      for (UIView *p = view.superview; p && p != view.window; p = p.superview)
+        [chain appendFormat:@" > %@[%@]", NSStringFromClass(p.class), p.accessibilityIdentifier ?: @""];
+      os_log(OS_LOG_DEFAULT, "[TWAB-Box] emote outside chat list, left clipped:%{public}@", chain);
+    }
+    return;
+  }
+  for (UIView *p = view.superview; p && p != view.window; p = p.superview) {
+    if ([p.accessibilityIdentifier isEqualToString:@"chat-message-list"]) break;
+    if (p.clipsToBounds) p.clipsToBounds = NO;
+  }
+}
+
 static void twab_scaleEmoteIfNeeded(UIView *view);
+
+// ─── Live declutter ─────────────────────────────────────────────────────────
+// Settings switches for stream-screen buttons apply to what's on screen right
+// away, instead of waiting for the next stream. Hiding the channel bar applies
+// live too; showing it again (undoing the masks and moved banners) waits for
+// the next stream, as does showing the leaderboard again (its data was
+// already emptied).
+static void twab_applyDeclutterIn(UIView *view, NSMutableArray *regions, int depth) {
+  static Class rnView;
+  if (!rnView) rnView = objc_getClass("RCTViewComponentView");
+  NSString *testID = view.accessibilityIdentifier;
+  if (testID.length && rnView && [view isKindOfClass:rnView]) {
+    BOOL barHidden = [tweakDefaults boolForKey:TWABKeyHideChannelBar];
+    BOOL wasHidden = objc_getAssociatedObject(view, &twab_declutterHiddenKey) != nil;
+    if ([testID isEqualToString:@"chat-message-region"]) {
+      [regions addObject:view];
+    } else if ([testID isEqualToString:@"feed-recaps-shelf-absorb"] ||
+               (barHidden && twab_isPanelOnlyTestID(testID))) {
+      // Feed shelf needs its row shift; panel buttons follow the channel bar.
+    } else if ([testID isEqualToString:@"stage-inflow-metadata"]) {
+      if (barHidden && !wasHidden) {
+        objc_setAssociatedObject(view, &twab_declutterHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        view.hidden = YES;
+      }
+    } else if (twab_shouldHideTestID(testID) && twab_isSafeChatButton(view, testID)) {
+      if (!wasHidden) {
+        objc_setAssociatedObject(view, &twab_declutterHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        view.hidden = YES;
+      }
+    } else if (wasHidden && ![testID isEqualToString:@"channel-leaderboard-strip-pressable"]) {
+      twab_restoreDecluttered(view);
+    }
+  }
+  if (depth <= 0) return;
+  for (UIView *sub in view.subviews) twab_applyDeclutterIn(sub, regions, depth - 1);
+}
+
+static void twab_applyDeclutterNow(void) {
+  NSMutableArray *regions = [NSMutableArray array];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  for (UIWindow *window in UIApplication.sharedApplication.windows)
+    twab_applyDeclutterIn(window, regions, 120);
+#pragma clang diagnostic pop
+  if ([tweakDefaults boolForKey:TWABKeyHideChannelBar]) {
+    for (UIView *region in regions) {
+      twab_collapseChannelBar(region);
+      __weak UIView *weakRegion = region;
+      dispatch_async(dispatch_get_main_queue(), ^{ twab_collapseChannelBar(weakRegion); });
+    }
+  }
+  os_log(OS_LOG_DEFAULT, "[TWAB-Hide] applied settings live (%lu stream screens)",
+         (unsigned long)regions.count);
+}
+
+// TWABSettingsVC.m: a stream opened, so waiting setting changes are in effect.
+extern void twab_settingsStreamOpened(void);
 
 %hook RCTViewComponentView
 - (void)setAccessibilityIdentifier:(NSString *)identifier {
   %orig;
   UIView *view = (UIView *)self;
+  if ([identifier isEqualToString:@"chat-message-region"]) twab_settingsStreamOpened();
   // New buttons and banners aren't attached yet, so they're checked once they are.
   if ((twab_isPanelOnlyTestID(identifier) || [identifier isEqualToString:@"chat-top-banner-carousel"] ||
        [identifier isEqualToString:@"chat-top-of-chat"]) &&
@@ -1304,7 +1464,7 @@ static void twab_scaleEmoteIfNeeded(UIView *view);
       if (v) [v removeFromSuperview];
     });
     os_log(OS_LOG_DEFAULT, "[TWAB-Hide] removed %{public}@", identifier);
-  } else if (twab_shouldHideTestID(identifier)) {
+  } else if (twab_shouldHideTestID(identifier) && twab_isSafeChatButton(view, identifier)) {
     objc_setAssociatedObject(view, &twab_declutterHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     view.hidden = YES;
     os_log(OS_LOG_DEFAULT, "[TWAB-Hide] hid %{public}@", identifier);
@@ -1322,9 +1482,18 @@ static void twab_scaleEmoteIfNeeded(UIView *view);
     for (UIView *sub in view.subviews)
       if ([sub isKindOfClass:imgCls]) twab_scaleEmoteIfNeeded(sub);
   }
-  // Layout can reset `hidden` from React Native's own display value.
-  if (objc_getAssociatedObject(view, &twab_declutterHiddenKey)) view.hidden = YES;
   NSString *testID = view.accessibilityIdentifier;
+  // Layout can reset `hidden` from React Native's own display value. A chat
+  // button that has grown into more than a button (or now holds the text
+  // field) is shown again instead.
+  if (objc_getAssociatedObject(view, &twab_declutterHiddenKey)) {
+    if (twab_isSafeChatButton(view, testID)) {
+      view.hidden = YES;
+    } else {
+      twab_restoreDecluttered(view);
+      os_log(OS_LOG_DEFAULT, "[TWAB-Hide] %{public}@ is not just a button here, left visible", testID);
+    }
+  }
   if ([testID isEqualToString:@"feed-recaps-shelf-absorb"] && [tweakDefaults boolForKey:TWABKeyHideRecapsBar]) {
     __weak UIView *weakShelf = view;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1334,6 +1503,7 @@ static void twab_scaleEmoteIfNeeded(UIView *view);
   }
   if (([testID isEqualToString:@"stage-inflow-metadata"] ||
        [testID isEqualToString:@"chat-message-region"] ||
+       [testID isEqualToString:@"chat-message-list"] ||
        [testID isEqualToString:@"channel-metadata-collapsible"] ||
        twab_isPanelOnlyTestID(testID) ||
        [testID isEqualToString:@"chat-top-of-chat"] ||
@@ -1358,6 +1528,13 @@ static void twab_scaleEmoteIfNeeded(UIView *view);
   NSString *recycledID = ((UIView *)self).accessibilityIdentifier;
   if ([recycledID isEqualToString:@"feed-recaps-shelf-absorb"]) twab_shiftFeedRows((UIView *)self, 0);
   if ([recycledID isEqualToString:@"chat-message-region"]) ((UIView *)self).layer.mask = nil;
+  if ([recycledID isEqualToString:@"chat-message-list"]) {
+    for (UIView *sub in ((UIView *)self).subviews) {
+      if (!objc_getAssociatedObject(sub, &twab_scrollMaskKey)) continue;
+      sub.layer.mask = nil;
+      objc_setAssociatedObject(sub, &twab_scrollMaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+  }
   if (twab_isPanelOnlyTestID(recycledID)) ((UIView *)self).hidden = NO;
   %orig;
 }
@@ -1375,6 +1552,11 @@ static void twab_scaleEmoteIfNeeded(UIView *view);
 // Hide Channel Bar: drags in the space above the message list still scroll it.
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
   return %orig || twab_pointInExtendedTop((UIView *)self, point);
+}
+// Hide Channel Bar: keep the message mask in place as the chat scrolls.
+- (void)layoutSubviews {
+  %orig;
+  twab_updateScrollMask((UIScrollView *)self);
 }
 %end
 
@@ -1451,10 +1633,7 @@ static void twab_layoutWideEmote(UIView *view) {
       [CATransaction commit];
     }
   }
-  for (UIView *p = view.superview; p && p != view.window; p = p.superview) {
-    if (p.clipsToBounds) p.clipsToBounds = NO;
-    if ([p.accessibilityIdentifier isEqualToString:@"chat-message-list"]) break;
-  }
+  twab_unclipToChatList(view);
 }
 
 static void twab_scaleEmoteIfNeeded(UIView *view) {
@@ -1469,11 +1648,7 @@ static void twab_scaleEmoteIfNeeded(UIView *view) {
   if (sz.width < 20 || sz.height < 20) return;
   if (!twab_isInsideChatMessageList(view)) return;
   view.transform = CGAffineTransformMakeScale(totalScale, totalScale);
-  for (UIView *p = view.superview; p; p = p.superview) {
-    if (p.clipsToBounds) p.clipsToBounds = NO;
-    NSString *aid = p.accessibilityIdentifier;
-    if ([aid isEqualToString:@"chat-message-list"]) break;
-  }
+  twab_unclipToChatList(view);
 }
 
 %hook RCTImageComponentView
@@ -1625,9 +1800,44 @@ static void twab_applyLaunchTab(UITabBarController *tbc, NSString *when) {
     tbc.selectedIndex = (NSUInteger)idx;
 }
 
+static __weak UITabBarController *twab_tabBarController;
+static UIViewController *twab_removedCreateVC;  // kept so the tab can come back live
+
+// "+" tab, applied live from settings: removed by setting the tabs again
+// (the hook below drops it), or put back where it was.
+static void twab_applyCreateTabNow(void) {
+  UITabBarController *tbc = twab_tabBarController;
+  if (!tbc) return;
+  NSArray<UIViewController *> *vcs = tbc.viewControllers;
+  if ([tweakDefaults boolForKey:TWABKeyHideCreateTab]) {
+    Class createCls = objc_getClass("_TtC6Twitch16CreateTabBarItem");
+    BOOL present = NO;
+    for (UIViewController *vc in vcs) if (createCls && [vc.tabBarItem isKindOfClass:createCls]) present = YES;
+    if (present) [tbc setViewControllers:vcs animated:NO];
+  } else if (twab_removedCreateVC && ![vcs containsObject:twab_removedCreateVC]) {
+    NSMutableArray *restored = [vcs mutableCopy];
+    NSUInteger at = twab_removedTabIndex >= 0 ? MIN((NSUInteger)twab_removedTabIndex, restored.count)
+                                              : restored.count;
+    [restored insertObject:twab_removedCreateVC atIndex:at];
+    twab_removedTabIndex = -1;
+    twab_removedCreateVC = nil;
+    [tbc setViewControllers:restored animated:NO];
+    os_log(OS_LOG_DEFAULT, "[TWAB-Declutter] put the Create tab back (position %lu)", (unsigned long)at);
+  }
+}
+
+// Called by the settings screen after a declutter switch changes.
+void twab_applySettingsLive(void) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    twab_applyDeclutterNow();
+    twab_applyCreateTabNow();
+  });
+}
+
 %hook _TtC6Twitch16TabBarController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    twab_tabBarController = (UITabBarController *)self;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         UITabBarController *tbc = (UITabBarController *)self;
@@ -1657,6 +1867,8 @@ static void twab_applyLaunchTab(UITabBarController *tbc, NSString *when) {
         }] : NSNotFound;
         if (i != NSNotFound) {
             twab_removedTabIndex = (NSInteger)i;
+            twab_removedCreateVC = vcs[i];
+            twab_tabBarController = (UITabBarController *)self;
             NSMutableArray *kept = [vcs mutableCopy];
             [kept removeObjectAtIndex:i];
             os_log(OS_LOG_DEFAULT, "[TWAB-Declutter] removed Create tab (position %lu of %lu)",
@@ -2128,8 +2340,10 @@ static void twab_checkClass(const char *name) {
 
 
 %ctor {
-  // Ping proxies early so the first stream usually has a verdict to use.
+  // Ping proxies early so the first stream usually has a verdict to use, and
+  // start the background health checks that pick between them.
   dispatch_async(dispatch_get_main_queue(), ^{
+    twab_proxyPoolStart();
     if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled] || ![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled]) return;
     for (NSString *address in twab_effectiveProxyAddresses()) {
       NSURL *proxyURL = twab_normalizedProxyURL(address);

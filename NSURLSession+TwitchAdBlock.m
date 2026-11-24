@@ -51,6 +51,7 @@ NSDictionary *TWABParseProxyAddress(NSString *address) {
     authDelegate.inner     = self.delegate;
     authDelegate.proxyUser = info[@"user"];
     authDelegate.proxyPass = info[@"pass"];
+    if (info) authDelegate.proxyAddress = address;
 
     return [NSURLSession sessionWithConfiguration:configuration
                                          delegate:authDelegate

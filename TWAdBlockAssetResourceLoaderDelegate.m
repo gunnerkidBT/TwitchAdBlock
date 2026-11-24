@@ -1,5 +1,6 @@
 #import "TWAdBlockAssetResourceLoaderDelegate.h"
 #import "SettingsKeys.h"
+#import "TWABProxyPool.h"
 
 extern NSUserDefaults *tweakDefaults;
 
@@ -12,10 +13,11 @@ extern NSUserDefaults *tweakDefaults;
   components.scheme = @"https";
   NSMutableURLRequest *request = loadingRequest.request.mutableCopy;
   request.URL = components.URL;
-  NSString *proxy = twab_effectiveProxyAddress();
+  NSString *proxy = twab_proxyPoolPick(twab_effectiveProxyAddresses());
   NSURLSession *session = [[NSURLSession alloc] twab_proxySessionWithAddress:proxy];
   [[session dataTaskWithRequest:request
               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                twab_proxyPoolReportResult(proxy, error);
                 if (error) return [loadingRequest finishLoadingWithError:error];
                 loadingRequest.contentInformationRequest.contentType = AVFileTypeMPEG4;
                 [dataRequest respondWithData:data];

@@ -43,6 +43,7 @@
 #import "NSURL+TwitchAdBlock.h"
 #import "NSData+TwitchAdBlock.h"
 #import "NSURLSession+TwitchAdBlock.h"
+#import "TWABProxyPool.h"
 #import "ChannelPoints.h"
 
 // Forward declarations for host matchers defined in Tweak.x — needed by
@@ -143,6 +144,17 @@ static void twab_setupTokenizerHook(void);
 static NSDictionary *twab_entryForFakeId(NSString *fakeId);
 static void twab_loadChannelEmotes(NSString *roomId);
 static void twab_noteSentChatRequest(NSURLRequest *request);
+
+static BOOL twab_isAccessTokenRequest(NSURLRequest *request) {
+    NSData *body = request.HTTPBody;
+    if (!body.length) return NO;
+    for (NSString *name in @[@"PlaybackAccessToken", @"StreamAccessToken", @"VodAccessToken"]) {
+        NSData *needle = [name dataUsingEncoding:NSUTF8StringEncoding];
+        if ([body rangeOfData:needle options:0 range:NSMakeRange(0, body.length)].location != NSNotFound)
+            return YES;
+    }
+    return NO;
+}
 static void twab_registerEmote(NSString *word, NSString *provider,
                                NSString *realId, NSString *room,
                                BOOL animated, CGFloat ratio);
@@ -1038,7 +1050,9 @@ NSURL *twab_realEmoteURL(NSURL *url) {
     BOOL proxyEnabled = adBlockOn && [tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled];
     NSArray<NSString *> *proxyAddrs = proxyEnabled ? twab_effectiveProxyAddresses() : @[];
     BOOL isMasterPlaylist = twab_isMasterPlaylistHost(request.URL.host);
-    BOOL isGql = [request.URL.host isEqualToString:@"gql.twitch.tv"];
+    // Other API requests go direct, so content settings follow the viewer.
+    BOOL isGql = [request.URL.host isEqualToString:@"gql.twitch.tv"] &&
+                 twab_isAccessTokenRequest(request);
     // Proxy variant playlists (.m3u8) and video-weaver hosts but NOT
     // raw .ts segment fetches — those are bulk video data that would
     // kill throughput if tunnelled through the proxy.
@@ -1090,10 +1104,13 @@ NSURL *twab_realEmoteURL(NSURL *url) {
             if (!rewrote) {
                 // HTTP CONNECT proxy fallback — used for both master
                 // playlist (when not Luminous) and GQL requests.
-                NSString *connectAddr = nil;
+                // The pool picks among the configured proxies (spread by
+                // speed, sticky, steps around ones that fail).
+                NSMutableArray<NSString *> *validAddrs = [NSMutableArray array];
                 for (NSString *a in proxyAddrs) {
-                    if (twab_normalizedProxyURL(a)) { connectAddr = a; break; }
+                    if (twab_normalizedProxyURL(a)) [validAddrs addObject:a];
                 }
+                NSString *connectAddr = twab_proxyPoolPick(validAddrs);
                 if (connectAddr) {
                     static char sharedProxySessionKey, sharedProxyAddressKey;
                     NSURLSession *proxySession = nil;
@@ -1102,6 +1119,10 @@ NSURL *twab_realEmoteURL(NSURL *url) {
                         proxySession = [sessionAddress isEqualToString:connectAddr]
                             ? objc_getAssociatedObject(self, &sharedProxySessionKey) : nil;
                         if (!proxySession) {
+                            // Switching proxy: let the old session finish its
+                            // tasks, then free it.
+                            [(NSURLSession *)objc_getAssociatedObject(self, &sharedProxySessionKey)
+                                finishTasksAndInvalidate];
                             proxySession = [(NSURLSession *)self twab_proxySessionWithAddress:connectAddr];
                             objc_setAssociatedObject(self, &sharedProxySessionKey, proxySession,
                                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);

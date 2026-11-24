@@ -94,6 +94,18 @@ extern NSString *const TWABKeyChatEmoteScale;
 // NSInteger — text size preset: 0 = Default (1.0x), 1 = Large (1.15x), 2 = Extra Large (1.3x).
 // Beta: scales all React Native text in the app, not just chat.
 extern NSString *const TWABKeyChatTextScale;
+// NSString — country name of the built-in proxy the user prefers, or
+// nil/empty for Automatic. A preference, not a lock: if that proxy is down
+// the pool still fails over to the others.
+extern NSString *const TWABKeyPreferredProxy;
+
+// Country names of the built-in proxies, in the same order as the addresses
+// in the default proxy list.
+NSArray<NSString *> *twab_defaultProxyNames(void);
+
+// The built-in proxy address the user picked, or nil for Automatic (or when
+// Custom Proxy is on, where the preference doesn't apply).
+NSString *twab_preferredProxyAddress(void);
 
 // Resolves which proxy address to use right now: the user's custom value
 // when the custom-proxy toggle is on, otherwise the bundled default.

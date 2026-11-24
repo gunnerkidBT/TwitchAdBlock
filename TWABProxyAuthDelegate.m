@@ -1,4 +1,5 @@
 #import "TWABProxyAuthDelegate.h"
+#import "TWABProxyPool.h"
 #import <objc/runtime.h>
 #import <stdatomic.h>
 
@@ -106,6 +107,7 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    if (self.proxyAddress) twab_proxyPoolReportResult(self.proxyAddress, error);
     if ([self.inner respondsToSelector:_cmd])
         [(id<NSURLSessionTaskDelegate>)self.inner URLSession:session task:twab_taskForInner(task) didCompleteWithError:error];
     objc_setAssociatedObject(task, &twab_playerTaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
