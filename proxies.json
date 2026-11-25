@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "proxies": [
+    {
+      "name": "Russia",
+      "backup": true,
+      "addr": "6VhDZ0iOJX5m4xkrRbbHh4wHS3k02zEJOuBCR0XGww=="
+    },
+    {
+      "name": "Serbia",
+      "backup": false,
+      "addr": "9FQIMXWOJUNwlTYxB7bCipcRTWQt3CcLJuZJSE/Ow4KS"
+    },
+    {
+      "name": "Portugal",
+      "backup": false,
+      "addr": "9Us3E0iLJQ5Z5zBJI7bChJoRQ2ct3CYNJuZNSU/Ow4KS"
+    }
+  ]
+}
