@@ -1,20 +1,20 @@
 {
-  "v": 1,
+  "v": 2,
   "proxies": [
     {
       "name": "Russia",
       "backup": true,
-      "addr": "6VhDZ0iOJX5m4xkrRbbHh4wHS3k02zEJOuBCR0XGww=="
+      "addr": "1gdywFIaFJ3QgnJTRuxJG//Pw6ub5h27//WdLv0idcWyM4zY3ua1D36WsE7UJYYSAn+vs9bxOUm8vyHmjbZXgN0+GVnLgq1zvvG0fFiBRcA="
     },
     {
       "name": "Serbia",
       "backup": false,
-      "addr": "9FQIMXWOJUNwlTYxB7bCipcRTWQt3CcLJuZJSE/Ow4KS"
+      "addr": "hmLKu1PmLagck+A/2j70TflUGLt4t0shAg1vUBhUACIOP1mxuX4l2gGsD2/octpUoltPiZcbc06WjngfPfm2ZP9EAqOSSN5HVg36oZ8b8QPwI2FQgkrfSl424U/f7GCO"
     },
     {
       "name": "Portugal",
       "backup": false,
-      "addr": "9Us3E0iLJQ5Z5zBJI7bChJoRQ2ct3CYNJuZNSU/Ow4KS"
+      "addr": "b/pNtQ6i+USQ7BuiSSI8Fzx7Q0E74N9xMIcn8N4Cj88RYLe9nJ8XBtv+30wWdZdQVHSy0nVgY1UOwU/7FJT+R0Tp9kop4sNH6TmFr1czUQR3vnh3SgTJuLpRuo2WrWEb"
     }
   ]
 }
