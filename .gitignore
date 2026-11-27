@@ -4,3 +4,6 @@ packages/
 *.dSYM
 Resources
 CHANGELOG.technical.md
+proxies.local.txt
+Secrets.h
+proxies.key

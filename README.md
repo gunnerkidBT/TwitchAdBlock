@@ -22,9 +22,16 @@ A modified Twitch iOS app that blocks ads and adds some handy extras.
 - Skips the unskippable pre-roll ads before **live streams** and **recorded
   videos (VODs)** by routing through an ad-free-country proxy.
 - Clears ad banners and prompts out of the feeds — brand offers, the "buy Bits"
-  prompt, sponsor spots, and the Following-tab **"Go Ad-Free"** Turbo button.
-- Works out of the box with a built-in proxy, or you can add your own (including
-  a list of backups it tries in order).
+  prompt, sponsor spots, and the **"Go Ad-Free"** / **"Try Ad-Free"** Turbo
+  buttons (Following tab and your profile).
+- Works out of the box with several built-in servers in different countries:
+  it checks them in the background, spreads streams across the ones that work
+  and switches automatically if one goes down. Pick a country yourself if you
+  like, or add your own proxies.
+- The server list updates by itself, so broken or slow servers can be swapped
+  out without an app update.
+- **Block Tracking** — stops Twitch's usage tracking, crash reports and ad
+  measurement from being sent.
 - Skips the proxy automatically if you already have a subscription or Turbo —
   you're already ad-free, and it keeps your account details private. You can
   also pick channels to always skip it for.
@@ -196,6 +203,29 @@ directory has bad permissions 777").
    CHANGELOG.md. For a Twitch-only rebuild, pass e.g. `--heading "Twitch 32.2"`.
    Every version in `apps.json` needs a unique build number, or AltStore
    rejects the whole source.
+
+**Changing the default servers (maintainer)**
+
+Apps download `proxies.json` from this repo at launch, so servers can be
+added, removed or swapped without a new release:
+
+1. Edit `proxies.local.txt` (not committed), one server per line:
+   `Name | user:pass@host:port`, adding `| backup` for servers that should
+   only be used when the others are down.
+2. Run `python make_proxies.py` (needs `pip install cryptography`). It
+   writes `proxies.json` and `Secrets.h` (the list built into the app). `--show` prints what's in `proxies.json`, and
+   `--builtin` sends apps back to their built-in list.
+3. Commit and push `proxies.json`. Apps pick it up next time they open, or
+   when they come back after a few hours. Rebuild at release time so the
+   built-in list matches.
+
+`proxies.key` (created on first run), `Secrets.h` and `proxies.local.txt`
+are never committed. Keep `proxies.key`: released apps can only read lists
+made with it. Building without `Secrets.h` works, but the app then has no
+default servers (Custom Proxy only).
+
+If the file is missing or invalid, apps keep the last list they had, or the
+built-in one.
 
 **Install**
 

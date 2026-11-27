@@ -1,5 +1,6 @@
 #import "SettingsKeys.h"
 #import "Config.h"
+#import "TWABRemoteProxies.h"
 
 extern NSUserDefaults *tweakDefaults;
 
@@ -38,10 +39,34 @@ NSString *const TWABKeyProxyWhitelist            = @"TWProxyWhitelist";
 NSString *const TWABKeyChatEmoteScale            = @"TWChatEmoteScale";
 NSString *const TWABKeyChatTextScale             = @"TWChatTextScale";
 NSString *const TWABKeyPreferredProxy            = @"TWPreferredProxy";
+NSString *const TWABKeyBlockTracking             = @"TWBlockTracking";
 
-// Same order as the entries in twab_defaultProxyAddress().
+// The default servers: the list from the repo when there is a valid one,
+// otherwise the one built into the app (Secrets.h). Each @{ name, addr, backup }.
+static NSArray<NSDictionary *> *twab_defaultProxyEntries(void) {
+    NSArray<NSDictionary *> *remote = twab_remoteProxyEntries();
+    return remote.count ? remote : twab_builtinProxyEntries();
+}
+
+NSString *twab_defaultProxyAddress(void) {
+    NSMutableArray *addrs = [NSMutableArray array];
+    for (NSDictionary *e in twab_defaultProxyEntries()) [addrs addObject:e[@"addr"]];
+    return [addrs componentsJoinedByString:@","];
+}
+
+// Same order as the addresses in twab_defaultProxyAddress().
 NSArray<NSString *> *twab_defaultProxyNames(void) {
-    return @[ @"Russia", @"Serbia", @"Portugal" ];
+    NSMutableArray *names = [NSMutableArray array];
+    for (NSDictionary *e in twab_defaultProxyEntries()) [names addObject:e[@"name"]];
+    return names;
+}
+
+NSSet<NSString *> *twab_backupOnlyProxyAddresses(void) {
+    if ([tweakDefaults boolForKey:TWABKeyAdBlockCustomProxyEnabled]) return [NSSet set];
+    NSMutableSet *set = [NSMutableSet set];
+    for (NSDictionary *e in twab_defaultProxyEntries())
+        if ([e[@"backup"] boolValue]) [set addObject:e[@"addr"]];
+    return set;
 }
 
 NSString *twab_preferredProxyAddress(void) {
@@ -118,33 +143,4 @@ BOOL twab_channelIsWhitelisted(NSURL *usherURL) {
         if (trimmed.length && [trimmed isEqualToString:channel]) return YES;
     }
     return NO;
-}
-
-// XOR-obfuscated default proxy address. Plaintext is reconstructed once at
-// first call. Keeps the host/credentials out of the source AND out of
-// `strings` against the dylib.
-NSString *twab_defaultProxyAddress(void) {
-    static const uint8_t key = 0xA5;
-    static const uint8_t bytes[] = {
-        0xEE, 0xC2, 0x9C, 0x95, 0xEE, 0xC6, 0x9F, 0xE0, 0xCB, 0x91,
-        0xC4, 0xF1, 0x95, 0xE5, 0x91, 0x90, 0x8B, 0x9D, 0x94, 0x8B,
-        0x92, 0x93, 0x8B, 0x97, 0x97, 0x92, 0x9F, 0x9D, 0x95, 0x95,
-        0x95, 0x89, 0xF3, 0xCE, 0xD7, 0xC3, 0xD3, 0xC6, 0x9F, 0xDD,
-        0xDD, 0xE7, 0xEB, 0xEB, 0xD7, 0xE5, 0x94, 0x9D, 0x90, 0x8B,
-        0x92, 0x96, 0x8B, 0x94, 0x9D, 0x95, 0x8B, 0x94, 0x94, 0x92,
-        0x9F, 0x9D, 0x95, 0x95, 0x95, 0x89, 0xF2, 0xD1, 0xE8, 0xE1,
-        0xEE, 0xC3, 0x9F, 0x90, 0xF4, 0x95, 0xED, 0x93, 0xF3, 0xE5,
-        0x94, 0x93, 0x9D, 0x8B, 0x9C, 0x95, 0x8B, 0x94, 0x9C, 0x93,
-        0x8B, 0x94, 0x90, 0x93, 0x9F, 0x9D, 0x95, 0x95, 0x95,
-    };
-    static NSString *cached;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        size_t n = sizeof(bytes);
-        char buf[n + 1];
-        for (size_t i = 0; i < n; i++) buf[i] = bytes[i] ^ key;
-        buf[n] = '\0';
-        cached = [NSString stringWithUTF8String:buf];
-    });
-    return cached;
 }

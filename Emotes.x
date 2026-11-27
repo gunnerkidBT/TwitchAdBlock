@@ -49,6 +49,7 @@
 // Forward declarations for host matchers defined in Tweak.x — needed by
 // the consolidated __NSURLSessionLocal hook below.
 extern BOOL twab_isAdHost(NSString *host);
+extern NSURLRequest *twab_trackingBlockedRequest(NSURLRequest *request);
 extern BOOL twab_isPlaylistHost(NSString *host);
 extern BOOL twab_isMasterPlaylistHost(NSString *host);
 extern BOOL twab_isExternalPlayback(void);
@@ -987,6 +988,10 @@ NSURL *twab_realEmoteURL(NSURL *url) {
     if ([_td[@"twab_inProxyDispatch"] boolValue]) {
         return %orig(request);
     }
+
+    // Block Tracking (analytics, crash reports, ad measurement).
+    NSURLRequest *untracked = twab_trackingBlockedRequest(request);
+    if (untracked) return %orig(untracked);
 
     // Targeted diagnostic only. Logging every URL through this hook
     // floods the system log past what Console.app / idevicesyslog can

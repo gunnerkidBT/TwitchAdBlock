@@ -475,6 +475,33 @@ id twab_stripPreloadFeedAds(id result, NSUInteger depth) {
     return out ?: self;
 }
 
+// Requests that load the viewer's turboStatus (Twitch 32.2). They share one
+// cached user record, so all of them must be edited or a later one (e.g. on
+// opening the profile's Videos tab) brings "Try Ad-Free" back.
+BOOL twab_isTurboStatusOperation(NSString *opName) {
+    return [opName isEqualToString:@"ChannelProfileShell"] ||
+           [opName isEqualToString:@"CurrentUser"] ||
+           [opName isEqualToString:@"MwebDiscoveryFeedPreloadQuery"];
+}
+
+// Hide "Go Ad-Free": marks every turboStatus in a response as active Turbo.
+static void twab_markTurboActive(id node, NSUInteger depth, BOOL *dirty) {
+    if (!node || depth > 30) return;
+    if ([node isKindOfClass:NSMutableDictionary.class]) {
+        NSMutableDictionary *d = node;
+        id status = d[@"turboStatus"];
+        if ([status isKindOfClass:NSMutableDictionary.class] &&
+            ![status[@"hasActiveTurbo"] isEqual:@YES]) {
+            status[@"hasActiveTurbo"] = @YES;
+            *dirty = YES;
+            os_log(OS_LOG_DEFAULT, "[TWAB-AdFree] profile: hid Try Ad-Free");
+        }
+        for (id v in d.allValues) twab_markTurboActive(v, depth + 1, dirty);
+    } else if ([node isKindOfClass:NSArray.class]) {
+        for (id v in (NSArray *)node) twab_markTurboActive(v, depth + 1, dirty);
+    }
+}
+
 - (NSData *)twab_responseDataForRequest:(NSURLRequest *)request {
     if (!request) return self;
     if (![request.URL.host isEqualToString:@"gql.twitch.tv"] ||
@@ -509,6 +536,10 @@ id twab_stripPreloadFeedAds(id result, NSUInteger depth) {
         NSMutableDictionary *op = ops[i];
         if (![op isKindOfClass:NSMutableDictionary.class]) continue;
         NSString *opName = twab_responseOperationName(op, request, i);
+        // Profile page (React Native since Twitch 32.2) shows "Try Ad-Free"
+        // unless turboStatus.hasActiveTurbo, so the button is never created.
+        if (hideAdFree && twab_isTurboStatusOperation(opName))
+            twab_markTurboActive(op[@"data"], 0, &dirty);
         if (adBlock) twab_processTree(op[@"data"], arraySet, fieldSet, op[@"operationName"], &dirty);
         if (stripWatchLimit) twab_neutralizeWatchLimits(op[@"data"], &dirty);
         if (hideAdFree && [opName isEqualToString:@"TurboUpsellButton"] &&

@@ -5,6 +5,36 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.26 — November 27, 2026
+
+**Block Tracking.** A new switch under Ad Blocking, on by default, stops
+Twitch's usage tracking, crash reports and ad measurement from being sent.
+Nothing in the app changes; it just sends less about you.
+
+**Full quality on Automatic.** One of the built-in servers is in a country
+where Twitch limits streams to 720p. Automatic now only uses it as a backup
+when the others are down, so you get 1080p (and higher) without changing
+anything. It's marked "backup, up to 720p" in the server list, and you can
+still pick it yourself.
+
+**Servers update without an app update.** The server list now updates by
+itself in the background. If a server goes down, slows down or starts
+showing ads, it can be swapped out or a new one added within minutes, and
+you get it the next time you open the app, with nothing to install. If the
+list can't be downloaded, the app keeps using the one it already has.
+
+**Fixed "Try Ad-Free" on your profile.** Twitch 32.2 rebuilt the profile
+page, so Hide "Go Ad-Free" Button no longer removed its "Try Ad-Free" button,
+and the old way of hiding it could upset the layout of the page. It's now
+removed cleanly, with no leftover gap.
+
+**Fixed missing category buttons on the Live page.** With Hide "From
+Channels You Follow" on, the buttons above the streams (All, League of
+Legends and so on) didn't show until you scrolled or switched tabs. They now
+show as soon as the page opens.
+
+---
+
 ## v0.1.25 — November 24, 2026
 
 **Updated for Twitch 32.2.**

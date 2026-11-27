@@ -8,6 +8,7 @@
 #import "SettingsKeys.h"
 #import "ChannelPoints.h"
 #import "TWABProxyPool.h"
+#import "TWABRemoteProxies.h"
 
 NSBundle *tweakBundle;
 NSUserDefaults *tweakDefaults;
@@ -36,6 +37,72 @@ BOOL twab_isAdHost(NSString *host) {
         [host hasSuffix:[@"." stringByAppendingString:s]]) return YES;
   }
   return NO;
+}
+
+// Block Tracking: Twitch's usage analytics, crash/usage reporting SDKs, audience
+// measurement and ad-verification (Open Measurement) hosts. Found in the 32.2
+// app. Not blocked on purpose: branch.io (share links open the app through it),
+// firebaseinstallations (push notifications), d3aqoihi2n8ty8.cloudfront.net
+// (app images and animations).
+BOOL twab_isTrackingHost(NSString *host) {
+  if (!host.length) return NO;
+  static NSSet *exact;
+  static NSArray *suffixes;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    exact = [NSSet setWithObjects:
+      @"spade.twitch.tv",
+      @"ddacn6pr5v0tl.cloudfront.net",           // Open Measurement scripts
+      @"firebaselogging.googleapis.com",
+      @"crashlyticsreports-pa.googleapis.com",
+      @"firebase-settings.crashlytics.com",
+      nil];
+    suffixes = @[ @"scorecardresearch.com", @"imrworldwide.com", @"ingest.sentry.io",
+                  @"ingest.us.sentry.io", @"moatads.com", @"adsafeprotected.com",
+                  @"doubleverify.com" ];
+  });
+  if ([exact containsObject:host]) return YES;
+  for (NSString *s in suffixes)
+    if ([host isEqualToString:s] || [host hasSuffix:[@"." stringByAppendingString:s]]) return YES;
+  return NO;
+}
+
+// The request rewritten so it fails at once (unsupported scheme), or nil when
+// it isn't a tracking request or Block Tracking is off. Callers expect a task
+// back, so tracking requests are failed rather than refused with nil.
+NSURL *twab_trackingBlockedURL(NSURL *url) {
+  if (!url.host || ![tweakDefaults boolForKey:TWABKeyBlockTracking] || !twab_isTrackingHost(url.host))
+    return nil;
+  // One summary line a minute (per host counts), so a retry loop would show.
+  static NSCountedSet *counts;
+  static CFAbsoluteTime windowStart;
+  @synchronized (NSCountedSet.class) {
+    if (!counts) counts = [NSCountedSet set];
+    [counts addObject:url.host];
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (!windowStart) windowStart = now;
+    if (now - windowStart >= 60) {
+      NSMutableArray *parts = [NSMutableArray array];
+      NSUInteger total = 0;
+      for (NSString *h in counts) {
+        [parts addObject:[NSString stringWithFormat:@"%@ %lu", h, (unsigned long)[counts countForObject:h]]];
+        total += [counts countForObject:h];
+      }
+      os_log(OS_LOG_DEFAULT, "[TWAB-Track] blocked %lu requests in the last %.0fs: %{public}@",
+             (unsigned long)total, now - windowStart, [parts componentsJoinedByString:@", "]);
+      [counts removeAllObjects];
+      windowStart = now;
+    }
+  }
+  return [NSURL URLWithString:[@"twab-blocked://" stringByAppendingString:url.host]];
+}
+
+NSURLRequest *twab_trackingBlockedRequest(NSURLRequest *request) {
+  NSURL *blocked = twab_trackingBlockedURL(request.URL);
+  if (!blocked) return nil;
+  NSMutableURLRequest *m = request.mutableCopy;
+  m.URL = blocked;
+  return m;
 }
 
 // Playlist + HLS segment hosts. Non-static so the shared
@@ -167,6 +234,8 @@ void twab_checkPlaylistForAds(NSData *data, NSURLRequest *request) {
       "[TWAB-URL] NSURLSession host=%{public}@ path=%{public}@",
       _host, request.URL.path ?: @"?");
   }
+  NSURLRequest *untracked = twab_trackingBlockedRequest(request);
+  if (untracked) return %orig(untracked);
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) return %orig;
   if (twab_isAdHost(request.URL.host))
     return nil;
@@ -195,6 +264,8 @@ void twab_checkPlaylistForAds(NSData *data, NSURLRequest *request) {
 }
 - (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request
                                          fromData:(NSData *)bodyData {
+  NSURLRequest *untracked = twab_trackingBlockedRequest(request);
+  if (untracked) return %orig(untracked, bodyData);
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) return %orig;
   if (twab_isAdHost(request.URL.host))
     return nil;
@@ -719,6 +790,13 @@ static NSData *twab_filteredFeedData(id delegate, NSData *data, NSURLSessionData
     if (!needHold && [tweakDefaults boolForKey:TWABKeyEmotesEnabled] &&
         twab_requestNamesOperation(dataTask.originalRequest, @"ChatEmoteSets"))
       needHold = YES;
+    // Profile page's "Try Ad-Free" (React Native since Twitch 32.2): every
+    // request that loads the viewer's turboStatus.
+    if (!needHold && [tweakDefaults boolForKey:TWABKeyHideAdFreeButton] &&
+        (twab_requestNamesOperation(dataTask.originalRequest, @"ChannelProfileShell") ||
+         twab_requestNamesOperation(dataTask.originalRequest, @"CurrentUser") ||
+         twab_requestNamesOperation(dataTask.originalRequest, @"MwebDiscoveryFeedPreloadQuery")))
+      needHold = YES;
     if (needHold) {
       objc_setAssociatedObject(dataTask, &twab_wholeResponseHeldKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
       return twab_bufferEmoteChunk(data, dataTask);
@@ -787,6 +865,43 @@ static id twab_nullWatchLimits(id obj, NSUInteger depth) {
   return obj;
 }
 
+// Hide "Go Ad-Free" (Twitch 32.2): the feed preload also carries the viewer's
+// turboStatus (MwebDiscoveryFeedPreloadQuery). Mark it active, as for the
+// network responses, in objects or JSON text.
+static id twab_markTurboActiveAny(id obj, NSUInteger depth) {
+  if (!obj || depth > 40) return obj;
+  if ([obj isKindOfClass:NSDictionary.class]) {
+    NSMutableDictionary *d = [(NSDictionary *)obj mutableCopy];
+    for (id key in [d allKeys]) {
+      if ([key isEqual:@"turboStatus"] && [d[key] isKindOfClass:NSDictionary.class]) {
+        NSMutableDictionary *status = [d[key] mutableCopy];
+        status[@"hasActiveTurbo"] = @YES;
+        d[key] = status;
+      } else {
+        d[key] = twab_markTurboActiveAny(d[key], depth + 1);
+      }
+    }
+    return d;
+  }
+  if ([obj isKindOfClass:NSArray.class]) {
+    NSMutableArray *a = [NSMutableArray arrayWithCapacity:[(NSArray *)obj count]];
+    for (id v in (NSArray *)obj) [a addObject:twab_markTurboActiveAny(v, depth + 1) ?: (id)kCFNull];
+    return a;
+  }
+  if ([obj isKindOfClass:NSString.class] && [(NSString *)obj containsString:@"hasActiveTurbo"]) {
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+      re = [NSRegularExpression regularExpressionWithPattern:
+              @"(\\\\?\"hasActiveTurbo\\\\?\"\\s*:\\s*)false" options:0 error:nil];
+    });
+    NSString *s = obj;
+    return [re stringByReplacingMatchesInString:s options:0 range:NSMakeRange(0, s.length)
+                                   withTemplate:@"$1true"];
+  }
+  return obj;
+}
+
 static void twab_hookFeedPreload(void) {
   SEL sel = NSSelectorFromString(@"awaitFeedPreload:rejecter:");
   BOOL found = NO;
@@ -803,19 +918,23 @@ static void twab_hookFeedPreload(void) {
     IMP orig = method_getImplementation(m);
     method_setImplementation(m, imp_implementationWithBlock(^(id self, twab_rnResolve resolve, twab_rnReject reject) {
       twab_rnResolve wrapped = resolve;
-      if (resolve && [tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) {
+      BOOL adBlock = [tweakDefaults boolForKey:TWABKeyAdBlockEnabled];
+      BOOL hideAdFree = [tweakDefaults boolForKey:TWABKeyHideAdFreeButton];
+      if (resolve && (adBlock || hideAdFree)) {
         wrapped = ^(id result) {
-          // This page skips the network hooks, so feed ads are removed here too. Left
-          // in, one stayed as a tall empty slot under the first channel.
-          id clean = twab_stripPreloadFeedAds(result, 0);
-          if (![tweakDefaults boolForKey:TWABKeyDisableWatchLimit]) {
-            resolve(clean);
-            return;
+          id out = result;
+          if (adBlock) {
+            // This page skips the network hooks, so feed ads are removed here too. Left
+            // in, one stayed as a tall empty slot under the first channel.
+            out = twab_stripPreloadFeedAds(out, 0);
+            if ([tweakDefaults boolForKey:TWABKeyDisableWatchLimit]) {
+              NSUInteger before = twab_preloadLimitsNulled;
+              out = twab_nullWatchLimits(out, 0);
+              os_log(OS_LOG_DEFAULT, "[TWAB-Watch] feed preload resolved (%{public}@), limits nulled: %lu",
+                     NSStringFromClass([result class]), (unsigned long)(twab_preloadLimitsNulled - before));
+            }
           }
-          NSUInteger before = twab_preloadLimitsNulled;
-          id out = twab_nullWatchLimits(clean, 0);
-          os_log(OS_LOG_DEFAULT, "[TWAB-Watch] feed preload resolved (%{public}@), limits nulled: %lu",
-                 NSStringFromClass([result class]), (unsigned long)(twab_preloadLimitsNulled - before));
+          if (hideAdFree) out = twab_markTurboActiveAny(out, 0);
           resolve(out);
         };
       }
@@ -875,6 +994,8 @@ extern NSURL *twab_realEmoteURL(NSURL *url);
 %hook __NSURLSessionLocal
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
                             completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+  NSURLRequest *untracked = twab_trackingBlockedRequest(request);
+  if (untracked) return %orig(untracked, completionHandler);
   // Our 3rd-party emote IDs only exist on their real CDNs.
   NSURL *real = request.URL ? twab_realEmoteURL(request.URL) : nil;
   if (real) {
@@ -887,11 +1008,34 @@ extern NSURL *twab_realEmoteURL(NSURL *url);
 // The chat box's emote previews use sharedSession dataTaskWithURL:.
 - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url
                         completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+  NSURL *untracked = twab_trackingBlockedURL(url);
+  if (untracked) return %orig(untracked, completionHandler);
   NSURL *real = url ? twab_realEmoteURL(url) : nil;
   if (real && completionHandler)
     return [(NSURLSession *)self dataTaskWithRequest:[NSURLRequest requestWithURL:real]
                                    completionHandler:completionHandler];
   return %orig(real ?: url, completionHandler);
+}
+// Block Tracking: crash/usage SDKs (Firebase, Sentry) upload their reports.
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request
+                                         fromData:(NSData *)bodyData
+                                completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+  NSURLRequest *untracked = twab_trackingBlockedRequest(request);
+  return %orig(untracked ?: request, bodyData, completionHandler);
+}
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request
+                                         fromFile:(NSURL *)fileURL
+                                completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+  NSURLRequest *untracked = twab_trackingBlockedRequest(request);
+  return %orig(untracked ?: request, fileURL, completionHandler);
+}
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromFile:(NSURL *)fileURL {
+  NSURLRequest *untracked = twab_trackingBlockedRequest(request);
+  return %orig(untracked ?: request, fileURL);
+}
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData {
+  NSURLRequest *untracked = twab_trackingBlockedRequest(request);
+  return %orig(untracked ?: request, bodyData);
 }
 %end
 
@@ -1217,6 +1361,113 @@ static void twab_restoreDecluttered(UIView *view) {
 // autoplay starts in the right place.
 static char twab_feedTopKey;
 
+// Live page category chips (All, League of Legends…, Twitch 32.2) hide when
+// the feed scrolls down by more than ~1.5x their height and show again after
+// a move up. Holding the feed at the bar's height counts as a scroll down, so
+// they stayed hidden until the user scrolled. When they fade out while the
+// feed sits at its top, scroll the feed a little further down and back:
+// Twitch sees a move up and shows the chips. While it's moved, the feed's
+// drawing is shifted back by the same amount (sublayerTransform), so nothing
+// moves on screen. Triggered by the fade itself, since the chips can start
+// listening to scrolls after the feed was already moved.
+static char twab_chipsNudgeKey;
+
+static void twab_setScrollQuietly(UIScrollView *s, CGFloat y, CGFloat drawShift) {
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  s.contentOffset = CGPointMake(s.contentOffset.x, y);
+  s.layer.sublayerTransform = drawShift ? CATransform3DMakeTranslation(0, drawShift, 0)
+                                        : CATransform3DIdentity;
+  [CATransaction commit];
+}
+
+static void twab_nudgeChipsVisible(UIScrollView *scroll, CGFloat top) {
+  if (!scroll || objc_getAssociatedObject(scroll, &twab_chipsNudgeKey)) return;
+  objc_setAssociatedObject(scroll, &twab_chipsNudgeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  // The move back up must exceed 0.75x Twitch's base height for the chips,
+  // which is taller than the 48pt row (48 didn't work, 80 did).
+  static const CGFloat overshoot = 100;
+  __weak UIScrollView *weakScroll = scroll;
+  // Steps 80 ms apart so React Native sends each one as its own scroll event
+  // (it throttles and merges events closer together).
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+    UIScrollView *s = weakScroll;
+    if (!s) return;
+    if (s.tracking || s.dragging || s.decelerating || fabs(s.contentOffset.y - top) >= 1) {
+      objc_setAssociatedObject(s, &twab_chipsNudgeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+      return;
+    }
+    twab_setScrollQuietly(s, top + overshoot, overshoot);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+      UIScrollView *s2 = weakScroll;
+      if (!s2) return;
+      // Always drop the draw shift; only move back if nothing else moved it.
+      BOOL untouched = !s2.tracking && !s2.dragging && !s2.decelerating &&
+                       fabs(s2.contentOffset.y - (top + overshoot)) < 1;
+      twab_setScrollQuietly(s2, untouched ? top : s2.contentOffset.y, 0);
+      os_log(OS_LOG_DEFAULT, "[TWAB-Chips] nudged feed so the category chips show (top %.0f)", top);
+      objc_setAssociatedObject(s2, &twab_chipsNudgeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    });
+  });
+}
+
+// The Live feed scroller next to the chips row (testID subfeed-chips-visibility)
+// when it's at its top (or mid-nudge), where the chips should always show;
+// otherwise nil. *outTop gets the top.
+static UIScrollView *twab_chipsFeedAtTop(UIView *chips, CGFloat *outTop) {
+  for (UIView *a = chips.superview; a; a = a.superview) {
+    UIView *list = twab_findTestID(a, @"feed-list", 4);
+    if (!list) continue;
+    for (UIView *sub in list.subviews) {
+      if (![sub isKindOfClass:UIScrollView.class]) continue;
+      UIScrollView *scroll = (UIScrollView *)sub;
+      CGFloat top = [objc_getAssociatedObject(scroll, &twab_feedTopKey) doubleValue];
+      if (top <= 0 || scroll.tracking || scroll.dragging || scroll.decelerating) return nil;
+      BOOL nudging = objc_getAssociatedObject(scroll, &twab_chipsNudgeKey) != nil;
+      if (!nudging && fabs(scroll.contentOffset.y - top) >= 1) return nil;
+      if (outTop) *outTop = top;
+      return scroll;
+    }
+    return nil;
+  }
+  return nil;
+}
+
+// Called as Twitch updates the chips row's props: once Twitch has faded them
+// out while the feed sits at its top, a nudge brings them back (Twitch fades
+// them in again).
+static void twab_chipsPropsUpdated(UIView *chips) {
+  if (!chips || chips.layer.opacity >= 0.05) return;
+  CGFloat top = 0;
+  UIScrollView *scroll = twab_chipsFeedAtTop(chips, &top);
+  if (!scroll) return;
+  static CFAbsoluteTime last, windowStart;
+  static int inWindow;
+  CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+  // Twitch can fade them out again after a nudge brought them back, and it
+  // sends no further updates once they're hidden: so a fade during the
+  // cooldown (or mid-nudge) is retried when it ends, never dropped.
+  CFTimeInterval wait = MAX(1.0 - (now - last), 0);
+  if (objc_getAssociatedObject(scroll, &twab_chipsNudgeKey)) wait = MAX(wait, 0.3);
+  static BOOL retryPending;
+  if (wait > 0) {
+    if (retryPending) return;
+    retryPending = YES;
+    __weak UIView *weakChips = chips;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((wait + 0.05) * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+      retryPending = NO;
+      twab_chipsPropsUpdated(weakChips);
+    });
+    return;
+  }
+  // Never loop: at most 6 nudges in any 10 s.
+  if (now - windowStart > 10) { windowStart = now; inWindow = 0; }
+  if (++inWindow > 6) return;
+  last = now;
+  twab_nudgeChipsVisible(scroll, top);
+}
+
 static void twab_shiftFeedRows(UIView *shelf, CGFloat height) {
   UIView *list = shelf.superview;
   while (list && ![list.accessibilityIdentifier isEqualToString:@"feed-list"]) list = list.superview;
@@ -1514,6 +1765,19 @@ extern void twab_settingsStreamOpened(void);
     dispatch_async(dispatch_get_main_queue(), ^{ twab_collapseChannelBar(weakView); });
   }
 }
+// Live page category chips fade by opacity props (see twab_chipsPropsUpdated).
+- (void)updateProps:(const void *)props oldProps:(const void *)oldProps {
+  %orig;
+  UIView *view = (UIView *)self;
+  if ([view.accessibilityIdentifier isEqualToString:@"subfeed-chips-visibility"] &&
+      [tweakDefaults boolForKey:TWABKeyHideRecapsBar] && view.layer.opacity < 0.05) {
+    __weak UIView *weakChips = view;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      UIView *chips = weakChips;
+      if (chips) twab_chipsPropsUpdated(chips);
+    });
+  }
+}
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
   NSNumber *cutoff = objc_getAssociatedObject(self, &twab_touchCutoffKey);
   if (cutoff && point.y >= cutoff.doubleValue) return NO;
@@ -1546,7 +1810,8 @@ extern void twab_settingsStreamOpened(void);
 - (void)setContentOffset:(CGPoint)offset {
   UIScrollView *scroll = (UIScrollView *)self;
   CGFloat top = [objc_getAssociatedObject(self, &twab_feedTopKey) doubleValue];
-  if (top > 0 && offset.y < top && !scroll.tracking && !scroll.dragging && !scroll.decelerating) offset.y = top;
+  BOOL held = top > 0 && offset.y < top && !scroll.tracking && !scroll.dragging && !scroll.decelerating;
+  if (held) offset.y = top;
   %orig(offset);
 }
 // Hide Channel Bar: drags in the space above the message list still scroll it.
@@ -2258,6 +2523,14 @@ static void twab_killAdFreeButton(UIView *v) {
 static void twab_scanForAdFree(UIView *root) {
   if (!root) return;
   NSString *cls = NSStringFromClass([root class]);
+  // React Native views lay out by frame: pinning one to zero size with
+  // constraints breaks the page around it (the 32.2 profile page's "Try
+  // Ad-Free" exposes that title). Those buttons are removed through Twitch's
+  // data instead (ChannelProfileShell, TurboUpsellButton).
+  if ([cls hasPrefix:@"RCT"]) {
+    for (UIView *sub in [root.subviews copy]) twab_scanForAdFree(sub);
+    return;
+  }
   if ((twab_strContains(cls, @"Upsell") || twab_strContains(cls, @"AdFree") ||
        twab_isAdFreeText(twab_viewText(root))) && !root.hidden && twab_isButtonSized(root)) {
     twab_killAdFreeButton(root);
@@ -2343,6 +2616,7 @@ static void twab_checkClass(const char *name) {
   // Ping proxies early so the first stream usually has a verdict to use, and
   // start the background health checks that pick between them.
   dispatch_async(dispatch_get_main_queue(), ^{
+    twab_remoteProxiesStart();
     twab_proxyPoolStart();
     if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled] || ![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled]) return;
     for (NSString *address in twab_effectiveProxyAddresses()) {
@@ -2374,6 +2648,8 @@ static void twab_checkClass(const char *name) {
     [tweakDefaults setBool:YES forKey:TWABKeyDisableWatchLimit];
   if (![tweakDefaults objectForKey:TWABKeyHideAdFreeButton])
     [tweakDefaults setBool:YES forKey:TWABKeyHideAdFreeButton];
+  if (![tweakDefaults objectForKey:TWABKeyBlockTracking])
+    [tweakDefaults setBool:YES forKey:TWABKeyBlockTracking];
   if (![tweakDefaults objectForKey:TWABKeyFitWideEmotes])
     [tweakDefaults setBool:YES forKey:TWABKeyFitWideEmotes];
   // Emote default lives here (not in Emotes.x's %ctor) because Logos

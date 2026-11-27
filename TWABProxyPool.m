@@ -78,6 +78,7 @@ NSString *twab_proxyPoolPick(NSArray<NSString *> *addresses) {
     double seed = twab_seed();
     NSString *preferred = twab_preferredProxyAddress();
     if (preferred && ![addresses containsObject:preferred]) preferred = nil;
+    NSSet<NSString *> *backups = twab_backupOnlyProxyAddresses();
     __block NSString *pick = nil;
     dispatch_sync(twab_poolQueue(), ^{
         // The user's chosen country while it works; otherwise fall through to
@@ -93,16 +94,23 @@ NSString *twab_proxyPoolPick(NSArray<NSString *> *addresses) {
                 return;
             }
         }
-        // Stay on the current proxy while it works.
-        if (twab_current && [addresses containsObject:twab_current]) {
-            TWABProxyState *s = twab_stateFor(twab_current);
-            if (!twab_isBenched(s) && (!s.up || s.up.boolValue)) { pick = twab_current; return; }
-        }
-
         NSMutableArray<NSString *> *candidates = [NSMutableArray array];
         for (NSString *a in addresses) {
             TWABProxyState *s = twab_stateFor(a);
             if (!twab_isBenched(s) && (!s.up || s.up.boolValue)) [candidates addObject:a];
+        }
+        // Backup-only servers (e.g. one where Twitch caps quality at 720p)
+        // are left out while any other server works.
+        if (backups.count) {
+            NSMutableArray<NSString *> *primary = [candidates mutableCopy];
+            [primary removeObjectsInArray:backups.allObjects];
+            if (primary.count) candidates = primary;
+        }
+        // Stay on the current proxy while it works (and isn't a backup the
+        // user no longer needs).
+        if (twab_current && [candidates containsObject:twab_current]) {
+            pick = twab_current;
+            return;
         }
         if (!candidates.count) {
             // All benched: use the one whose bench ends first, as long as its

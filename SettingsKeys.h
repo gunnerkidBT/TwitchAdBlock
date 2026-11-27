@@ -98,10 +98,18 @@ extern NSString *const TWABKeyChatTextScale;
 // nil/empty for Automatic. A preference, not a lock: if that proxy is down
 // the pool still fails over to the others.
 extern NSString *const TWABKeyPreferredProxy;
+// BOOL — block Twitch's usage analytics, crash/usage reports and ad
+// measurement (on by default).
+extern NSString *const TWABKeyBlockTracking;
 
 // Country names of the built-in proxies, in the same order as the addresses
 // in the default proxy list.
 NSArray<NSString *> *twab_defaultProxyNames(void);
+
+// Built-in proxies that Automatic only uses when every other one is down
+// (e.g. Russia, where Twitch caps quality at 720p). Empty with Custom Proxy
+// on. Choosing one by country still uses it.
+NSSet<NSString *> *twab_backupOnlyProxyAddresses(void);
 
 // The built-in proxy address the user picked, or nil for Automatic (or when
 // Custom Proxy is on, where the preference doesn't apply).

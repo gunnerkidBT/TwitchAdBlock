@@ -289,7 +289,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
-        case 0: return 1;  // ad block toggle
+        case 0: return 2;  // ad block toggle + block tracking
         case 1:
             if (!self.adblockEnabled) return 0;
             if (!self.proxyEnabled) return 1;
@@ -358,12 +358,19 @@ static const TWABLaunchOpt kLaunchOpts[] = {
          cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     switch (indexPath.section) {
         case 0:
-                return [self switchCellWithTitle:LOC(@"settings.adblock.title", @"Ad Block")
-                                        subtitle:LOC(@"settings.adblock.desc",
-                                                     @"Block video, display, and feed ads.")
-                                             on:_adblockEnabled
-                                         action:@selector(adblockSwitchChanged:)
-                                     identifier:@"AdBlockSwitch"];
+            if (indexPath.row == 1)
+                return [self switchCellWithTitle:LOC(@"settings.blocktracking.title", @"Block Tracking")
+                                        subtitle:LOC(@"settings.blocktracking.desc",
+                                                     @"Stop Twitch's usage tracking, crash reports and ad measurement from being sent.")
+                                             on:[tweakDefaults boolForKey:TWABKeyBlockTracking]
+                                         action:@selector(blockTrackingSwitchChanged:)
+                                     identifier:@"BlockTrackingSwitch"];
+            return [self switchCellWithTitle:LOC(@"settings.adblock.title", @"Ad Block")
+                                    subtitle:LOC(@"settings.adblock.desc",
+                                                 @"Block video, display, and feed ads.")
+                                         on:_adblockEnabled
+                                     action:@selector(adblockSwitchChanged:)
+                                 identifier:@"AdBlockSwitch"];
         case 1: {
             NSInteger row = indexPath.row;
             if (row == 0)
@@ -889,6 +896,8 @@ static const NSInteger kProxyTextFieldTag = 0xABCD;
             state = LOC(@"settings.proxy.status.offline.plain", @"Offline");
         else state = [NSString stringWithFormat:@"%.0f ms", [info[@"latencyMs"] doubleValue]];
         NSString *title = [NSString stringWithFormat:@"%@ · %@", name, state];
+        if ([twab_backupOnlyProxyAddresses() containsObject:addresses[i]])
+            title = [title stringByAppendingString:LOC(@"settings.proxy.backup720", @" · backup, up to 720p")];
         if ([chosen isEqualToString:name]) title = [@"✓  " stringByAppendingString:title];
         [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault
                                                 handler:^(UIAlertAction *_) { choose(name); }]];
@@ -1269,6 +1278,10 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     else       [self.tableView deleteRowsAtIndexPaths:@[sub] withRowAnimation:UITableViewRowAnimationFade];
 }
 
+- (void)blockTrackingSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyBlockTracking];
+}
+
 - (void)hideCreateTabSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideCreateTab];
     twab_applySettingsLive();
@@ -1471,7 +1484,8 @@ static NSArray<NSString *> *twab_exportKeys(void) {
               TWABKeyProxyWhitelist,
               TWABKeyChatEmoteScale,
               TWABKeyChatTextScale,
-              TWABKeyPreferredProxy ];
+              TWABKeyPreferredProxy,
+              TWABKeyBlockTracking ];
 }
 
 - (void)openKofi {
