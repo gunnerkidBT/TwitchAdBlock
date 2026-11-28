@@ -40,17 +40,9 @@ extern NSString *const TWABKeyHidePickerButton;
 // messages of users who were timed out / banned (CLEARCHAT), and shows a
 // system line saying what happened instead. Default NO.
 extern NSString *const TWABKeyKeepDeletedMessages;
-// BOOL - sub-setting of Keep Deleted Messages: when YES, the moderation note
-// is a highlighted chat message from "TwitchMods"; when NO (default), a plain
-// system line.
-extern NSString *const TWABKeyHighlightDeletedNotes;
 // BOOL - when YES, the Live page's "From channels you follow" bar of clips /
 // recaps (GraphQL op AnnouncementsRecapsBar) is emptied so it isn't shown.
 extern NSString *const TWABKeyHideRecapsBar;
-// BOOL - when YES (default), wide / tall 3rd-party emotes are padded to a
-// square so Twitch's square emote box shows them at their real proportions
-// instead of squished. NO = Twitch's stretched look.
-extern NSString *const TWABKeyFitWideEmotes;
 // BOOL - Declutter: remove the "+" (Create) tab from the bottom tab bar.
 extern NSString *const TWABKeyHideCreateTab;
 // BOOL - Declutter: remove the gifter/cheer leaderboard strip under the player.
@@ -80,8 +72,6 @@ extern NSString *const TWABKeyHidePolls;
 extern NSString *const TWABKeyHideSubGoal;
 // BOOL - Declutter: hide Twitch Drops notifications (community highlight) via GQL.
 extern NSString *const TWABKeyHideDrops;
-// NSInteger - Declutter: auto-dismiss pinned chat messages after N seconds (0 = never).
-extern NSString *const TWABKeyDismissPinnedSeconds;
 // BOOL - Declutter: hide the clip button on the player controls.
 extern NSString *const TWABKeyHideClipButton;
 // BOOL - when YES, bonus channel points (the chest that appears after watching)
@@ -101,6 +91,10 @@ extern NSString *const TWABKeyPreferredProxy;
 // BOOL — block Twitch's usage analytics, crash/usage reports and ad
 // measurement (on by default).
 extern NSString *const TWABKeyBlockTracking;
+// BOOL - Stream Rewind: Twitch's own live rewind (scrub bar, double-tap skip,
+// Jump to Live) on the live player, playing the stream's in-progress VOD.
+// Experimental (Twitch hasn't released it), default NO.
+extern NSString *const TWABKeyStreamRewind;
 
 // Country names of the built-in proxies, in the same order as the addresses
 // in the default proxy list.

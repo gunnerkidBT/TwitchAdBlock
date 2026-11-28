@@ -528,9 +528,9 @@ static void twab_presentPicker(UIView *chatInput, UIView<UITextInput> *target) {
 static char twab_pickerButtonKey;
 static char twab_pickerLongPressKey;
 
-// ─── Diagnostics ────────────────────────────────────────────────────────────
-// What the installer last saw, shown on the settings Diagnostics screen so a
-// missing button can be explained without a device log.
+// ─── Status log ─────────────────────────────────────────────────────────────
+// What the installer last saw, logged once per change so a missing button can
+// be explained from a device log.
 
 static NSString *twab_pickerStatus = @"chat input never laid out (hook not firing)";
 static NSString *twab_pickerChain = @"";
@@ -545,11 +545,6 @@ static void twab_setPickerStatus(NSString *status, UIView *emoticon) {
     os_log(OS_LOG_DEFAULT, "[TWAB-Picker] %{public}@ (%{public}@)", status, twab_pickerChain);
 }
 
-NSArray<NSString *> *twab_pickerDiagnostics(void) {
-    NSMutableArray *a = [NSMutableArray arrayWithObject:twab_pickerStatus];
-    if (twab_pickerChain.length) [a addObject:[@"Emote button parents: " stringByAppendingString:twab_pickerChain]];
-    return a;
-}
 
 // ─── Install ────────────────────────────────────────────────────────────────
 

@@ -50,6 +50,7 @@
 // the consolidated __NSURLSessionLocal hook below.
 extern BOOL twab_isAdHost(NSString *host);
 extern NSURLRequest *twab_trackingBlockedRequest(NSURLRequest *request);
+extern void twab_streamRewindPrefetch(NSURLRequest *request);
 extern BOOL twab_isPlaylistHost(NSString *host);
 extern BOOL twab_isMasterPlaylistHost(NSString *host);
 extern BOOL twab_isExternalPlayback(void);
@@ -992,6 +993,7 @@ NSURL *twab_realEmoteURL(NSURL *url) {
     // Block Tracking (analytics, crash reports, ad measurement).
     NSURLRequest *untracked = twab_trackingBlockedRequest(request);
     if (untracked) return %orig(untracked);
+    twab_streamRewindPrefetch(request);
 
     // Targeted diagnostic only. Logging every URL through this hook
     // floods the system log past what Console.app / idevicesyslog can
@@ -1028,7 +1030,10 @@ NSURL *twab_realEmoteURL(NSURL *url) {
     BOOL adBlockOn = [tweakDefaults boolForKey:TWABKeyAdBlockEnabled];
     BOOL emotesOn = [tweakDefaults boolForKey:TWABKeyEmotesEnabled];
 
-    if (adBlockOn && twab_isAdHost(request.URL.host)) return nil;
+    if (adBlockOn && twab_isAdHost(request.URL.host)) {
+        os_log(OS_LOG_DEFAULT, "[TWAB-Rewind-Ads] blocked ad host %{public}@", request.URL.host);
+        return nil;
+    }
 
     // GQL platform spoof — twab_requestDataForRequest: no-ops for non-gql hosts.
     if (adBlockOn) {
@@ -1298,7 +1303,6 @@ static NSString *twab_injectIRCEmotes(NSString *line) {
     // Room-aware: channel emotes first, then globals.
     // Wide emotes also get an invisible marker inserted before the word (see
     // twab_markWideEmotes); later emote positions shift by its length.
-    BOOL markWide = [tweakDefaults boolForKey:TWABKeyFitWideEmotes];
     NSMutableArray<NSString *> *newEntries = [NSMutableArray array];
     NSMutableArray<NSString *> *outWords = [NSMutableArray array];
     NSMutableArray<NSArray<NSNumber *> *> *inserts = [NSMutableArray array];  // [origPos, len]
@@ -1309,7 +1313,7 @@ static NSString *twab_injectIRCEmotes(NSString *line) {
         NSString *fakeId = wordLen ? twab_fakeIdForWord_inRoom(word, roomId) : nil;
         NSString *outWord = word;
         if (fakeId) {
-            CGFloat q = markWide ? twab_wideRatioForEmoteId(fakeId) : 0;
+            CGFloat q = twab_wideRatioForEmoteId(fakeId);
             if (q > 0) {
                 NSUInteger n = (NSUInteger)lround(q * 4.0);
                 NSMutableString *mark = [NSMutableString stringWithString:[NSString stringWithFormat:@"%C", (unichar)0x2063]];
@@ -1379,13 +1383,6 @@ static char twab_handlerWrappedKey;
 // timeouts); a full chat clear as CLEARCHAT with no user. With the setting
 // on, these never reach Twitch's chat — so nothing gets removed — and a
 // NOTICE system line saying what happened takes their place.
-static NSString *twab_formatDuration(NSInteger secs) {
-    if (secs < 60) return [NSString stringWithFormat:@"%lds", (long)secs];
-    if (secs < 3600) return [NSString stringWithFormat:@"%ldm", (long)(secs / 60)];
-    if (secs < 86400) return [NSString stringWithFormat:@"%ldh", (long)(secs / 3600)];
-    return [NSString stringWithFormat:@"%ldd", (long)(secs / 86400)];
-}
-
 // Returns the NOTICE line replacing a moderation command, or nil if `line`
 // isn't one.
 static NSString *twab_moderationNotice(NSString *line) {
@@ -1408,39 +1405,26 @@ static NSString *twab_moderationNotice(NSString *line) {
     channel = [channel stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
     if (!channel.length) return nil;
 
+    // Worded like Twitch's own chat notices (Twitch 32.2).
     NSString *text;
     if (isMsg) {
         NSString *login = twab_extractTag(tags, @"login") ?: @"someone";
         NSString *msg = trailing ?: @"";
-        if (msg.length > 200) msg = [[msg substringToIndex:200] stringByAppendingString:@"…"];
-        text = msg.length ? [NSString stringWithFormat:@"🛡 %@'s message was deleted: %@", login, msg]
-                          : [NSString stringWithFormat:@"🛡 A message from %@ was deleted", login];
+        if (msg.length > 80) msg = [[msg substringToIndex:80] stringByAppendingString:@"…"];
+        text = msg.length ? [NSString stringWithFormat:@"%@'s message was deleted by a moderator: \u201C%@\u201D", login, msg]
+                          : [NSString stringWithFormat:@"%@'s message was deleted by a moderator.", login];
     } else if (trailing.length) {
         NSString *dur = twab_extractTag(tags, @"ban-duration");
-        text = dur.length ? [NSString stringWithFormat:@"🛡 %@ was timed out for %@", trailing,
-                                twab_formatDuration(dur.integerValue)]
-                          : [NSString stringWithFormat:@"🛡 %@ was banned", trailing];
+        NSInteger secs = dur.integerValue;
+        text = dur.length ? [NSString stringWithFormat:@"%@ has been timed out for %ld second%@.", trailing,
+                                (long)secs, secs == 1 ? @"" : @"s"]
+                          : [NSString stringWithFormat:@"%@ is now banned from this channel.", trailing];
     } else {
-        text = @"🛡 Chat was cleared by a moderator";
+        text = @"Chat was cleared by a moderator.";
     }
     os_log(OS_LOG_DEFAULT, "[TWAB-Deleted] kept messages: %{public}@", text);
-    // Sent as a chat message from "TwitchMods" tagged msg-id=highlighted-message,
-    // so Twitch draws it with the channel-points "Highlight My Message"
-    // background — it stands out from normal chat. (A plain NOTICE rendered,
-    // but with no background.) room-id / timestamp come from the moderation
-    // command; the user-id is a fixed placeholder no real account uses.
-    // Settings → "Highlight Notes" off: plain system line, no background.
-    if (![tweakDefaults boolForKey:TWABKeyHighlightDeletedNotes])
-        return [NSString stringWithFormat:@"@msg-id=twab_moderation :tmi.twitch.tv NOTICE #%@ :%@", channel, text];
-    NSString *roomID = twab_extractTag(tags, @"room-id") ?: @"";
-    NSString *ts = twab_extractTag(tags, @"tmi-sent-ts") ?:
-        [NSString stringWithFormat:@"%lld", (long long)(NSDate.date.timeIntervalSince1970 * 1000)];
-    return [NSString stringWithFormat:
-        @"@badge-info=;badges=;color=#9146FF;display-name=TwitchMods;emotes=;first-msg=0;flags=;"
-        @"id=%@;mod=0;msg-id=highlighted-message;returning-chatter=0;room-id=%@;subscriber=0;"
-        @"tmi-sent-ts=%@;turbo=0;user-id=9999999999;user-type= "
-        @":twitchmods!twitchmods@twitchmods.tmi.twitch.tv PRIVMSG #%@ :%@",
-        NSUUID.UUID.UUIDString.lowercaseString, roomID, ts, channel, text];
+    // A plain system line, like Twitch's own moderation notices.
+    return [NSString stringWithFormat:@"@msg-id=twab_moderation :tmi.twitch.tv NOTICE #%@ :%@", channel, text];
 }
 
 // Filter Hermes PubSub notification frames that deliver community highlight
@@ -1729,7 +1713,6 @@ static NSArray *twab_injectEmoteTokens(NSArray *tokens) {
 // width/height) right before the emote so the text layout hook in Tweak.x
 // can give that emote a wider slot in the line.
 static NSArray *twab_markWideEmotes(NSArray *tokens) {
-    if (![tweakDefaults boolForKey:TWABKeyFitWideEmotes]) return tokens;
     static Class textTokenCls, emoteTokenCls;
     static id lastFlags;
     static dispatch_once_t once;
@@ -1791,8 +1774,7 @@ static NSMutableArray<NSDictionary *> *twab_sentMessages(void) {
 
 // {words, ratios, t} for `text`, or nil if it has no wide third-party emote.
 static NSDictionary *twab_wideWordsEntry(NSString *text) {
-    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled] ||
-        ![tweakDefaults boolForKey:TWABKeyFitWideEmotes] || !text.length) return nil;
+    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled] || !text.length) return nil;
     NSArray<NSString *> *words = [[text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
                                   componentsSeparatedByString:@" "];
     NSMutableArray<NSNumber *> *ratios = [NSMutableArray arrayWithCapacity:words.count];
@@ -1817,8 +1799,7 @@ static void twab_noteDraftText(NSString *text) {
 }
 
 static void twab_noteSentText(NSString *text) {
-    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled] ||
-        ![tweakDefaults boolForKey:TWABKeyFitWideEmotes] || !text.length) return;
+    if (![tweakDefaults boolForKey:TWABKeyEmotesEnabled] || !text.length) return;
     NSArray<NSString *> *words = [text componentsSeparatedByString:@" "];
     NSMutableArray<NSNumber *> *ratios = [NSMutableArray arrayWithCapacity:words.count];
     BOOL any = NO;

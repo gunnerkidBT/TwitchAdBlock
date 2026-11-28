@@ -32,6 +32,7 @@ static NSDictionary<NSString *, NSArray *> *twab_pendingTracked(void) {
             @"HidePollsSwitch"               : @[TWABKeyHidePolls, @NO],
             @"HideSubGoalSwitch"             : @[TWABKeyHideSubGoal, @NO],
             @"HideDropsSwitch"               : @[TWABKeyHideDrops, @NO],
+            @"StreamRewindSwitch"            : @[TWABKeyStreamRewind, @NO],
         };
     });
     return d;
@@ -69,95 +70,8 @@ extern NSBundle *tweakBundle;
 extern NSUserDefaults *tweakDefaults;
 // Emotes.x — clears the emote registry and re-fetches global sets.
 extern void twab_reloadEmotes(void);
-// Tweak.x — [{ @"name": NSString, @"present": @(BOOL) }, ...] for the
-// hooked Twitch classes, recorded at launch.
-extern NSArray<NSDictionary *> *twab_classDiagnostics(void);
-extern NSArray<NSString *> *twab_pickerDiagnostics(void);
 
 #define LOC(x, d) (tweakBundle ? [tweakBundle localizedStringForKey:x value:d table:nil] : (d))
-
-// Read-only screen listing which hooked Twitch/TwitchKit/Apollo classes
-// resolved in the running binary. ✓ = hook active; ✗ = Twitch renamed or
-// removed the class and that feature is silently inactive until updated.
-@interface TWABDiagnosticsVC : UITableViewController
-@end
-
-@implementation TWABDiagnosticsVC {
-    NSArray<NSDictionary *> *_items;
-    NSArray<NSString *> *_pickerLines;
-}
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.title = LOC(@"settings.diag.title", @"Diagnostics");
-    _items = twab_classDiagnostics() ?: @[];
-    _pickerLines = twab_pickerDiagnostics() ?: @[];
-    // Only show "Done" when we're the root of a presented nav controller
-    // (settings had no nav, so showDiagnostics wrapped + presented us). When
-    // pushed onto an existing nav stack, the back button handles dismissal —
-    // adding Done there would tear down the whole settings flow.
-    BOOL isPresentedRoot = self.navigationController.viewControllers.firstObject == self &&
-                           self.navigationController.presentingViewController != nil;
-    if (isPresentedRoot) {
-        self.navigationItem.leftBarButtonItem =
-            [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
-                                                          target:self
-                                                          action:@selector(twabDone)];
-    }
-}
-- (void)twabDone { [self dismissViewControllerAnimated:YES completion:nil]; }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return 2; }
-- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s {
-    return (NSInteger)(s == 0 ? _items.count : _pickerLines.count);
-}
-- (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip {
-    if (ip.section == 1) {
-        UITableViewCell *cell = [t dequeueReusableCellWithIdentifier:@"picker"];
-        if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                                 reuseIdentifier:@"picker"];
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        cell.textLabel.text = _pickerLines[ip.row];
-        cell.textLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
-        cell.textLabel.numberOfLines = 0;
-        return cell;
-    }
-    UITableViewCell *cell = [t dequeueReusableCellWithIdentifier:@"diag"];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
-                                             reuseIdentifier:@"diag"];
-    cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    NSDictionary *item = _items[ip.row];
-    BOOL present = [item[@"present"] boolValue];
-    NSString *status = present ? LOC(@"settings.diag.ok", @"✓ OK")
-                               : LOC(@"settings.diag.missing", @"✗ missing");
-    UIColor *color = present ? [UIColor systemGreenColor] : [UIColor systemRedColor];
-    if ([cell respondsToSelector:@selector(defaultContentConfiguration)]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunguarded-availability-new"
-        UIListContentConfiguration *cfg = [cell defaultContentConfiguration];
-        cfg.text = item[@"name"];
-        cfg.textProperties.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
-        cfg.secondaryText = status;
-        cfg.secondaryTextProperties.color = color;
-        [cell setContentConfiguration:cfg];
-#pragma clang diagnostic pop
-    } else {
-        cell.textLabel.text = item[@"name"];
-        cell.textLabel.font = [UIFont systemFontOfSize:11];
-        cell.detailTextLabel.text = status;
-        cell.detailTextLabel.textColor = color;
-    }
-    return cell;
-}
-- (NSString *)tableView:(UITableView *)t titleForHeaderInSection:(NSInteger)s {
-    if (s == 1) return @"Emote picker (open chat first)";
-    return LOC(@"settings.diag.header", @"Hooked Twitch classes (this build)");
-}
-- (NSString *)tableView:(UITableView *)t titleForFooterInSection:(NSInteger)s {
-    if (s == 1) return nil;
-    return LOC(@"settings.diag.footer",
-        @"✓ = the class resolved and its hook is active. ✗ = Twitch renamed or "
-        @"removed it, so that feature is inactive until the hook is updated.");
-}
-@end
 
 @interface TWABSettingsVC () <UIDocumentPickerDelegate>
 @property (nonatomic, assign) BOOL adblockEnabled;
@@ -244,19 +158,22 @@ extern NSArray<NSString *> *twab_pickerDiagnostics(void);
     // Non-zero estimate enables self-sizing for the subtitle toggle rows
     // (heightForRowAtIndexPath returns UITableViewAutomaticDimension for them).
     self.tableView.estimatedRowHeight = 60;
+    self.tableView.estimatedSectionFooterHeight = 44;
     if (self.proxyEnabled) [self refreshProxyStatus];
 }
 
 #pragma mark - UITableViewDataSource
 
 // Section layout:
-//   0: Ad Block toggle           (always shown)
-//   1: Proxy + custom proxy      (only when ad block is on)
-//   2: Emotes toggle + keep wide emote shape + keep deleted messages [+ highlight notes] + reload
-//   3: Home: launch / keep-live-feed
-//   4: Declutter: go ad-free / stories / "from channels you follow" / 7TV bar / "+" (Create)
-//   5: Tools: export / import / diagnostics
-//   6: empty / version footer    (always shown — last section)
+//   0: Ad Blocking: ad block + block tracking
+//   1: Proxy (only when ad block is on): proxy, custom proxy, servers, skip list
+//   2: Chat: auto-claim, emotes, keep deleted, sizes, reload emotes
+//   3: Home & Playback: launch screen, keep live feed playing, stream rewind
+//   4: Declutter: Stream
+//   5: Declutter: Chat (Community Highlights sub-options while it's on)
+//   6: Declutter: Feeds & Tabs
+//   7: Tools: export / import
+//   8: version footer (no rows)
 
 // Launch Screen options. tabIndex < 0 means "use Twitch's default" (both
 // keys cleared). subTabIndex < 0 means "don't override sub-tab".
@@ -266,20 +183,26 @@ extern NSArray<NSString *> *twab_pickerDiagnostics(void);
 //   tab 1 Browse sub 0 Categories, sub 1 Live Channels
 //   tab 3 Activity
 //   tab 4 Profile
+// group: the menu section an option sits in ("Home", "Browse"; "" = an
+// untitled section; "*" = the Default section). name: its label in the menu.
+// symbol: its SF Symbol.
 typedef struct {
     const char *title;
+    const char *group;
+    const char *name;
+    const char *symbol;
     NSInteger tabIndex;
     NSInteger subTabIndex;
 } TWABLaunchOpt;
 static const TWABLaunchOpt kLaunchOpts[] = {
-    { "Default",                 -1, -1 },
-    { "Home → Following",        0,  0 },
-    { "Home → Live",             0,  1 },
-    { "Home → Clips",            0,  2 },
-    { "Browse → Categories",     1,  0 },
-    { "Browse → Live Channels",  1,  1 },
-    { "Activity",                3, -1 },
-    { "Profile",                 4, -1 },
+    { "Default",                "*",      "Twitch Default", "iphone",                        -1, -1 },
+    { "Home → Following",       "Home",   "Following",      "heart",                          0,  0 },
+    { "Home → Live",            "Home",   "Live",           "dot.radiowaves.left.and.right",  0,  1 },
+    { "Home → Clips",           "Home",   "Clips",          "film",                           0,  2 },
+    { "Browse → Categories",    "Browse", "Categories",     "square.grid.2x2",                1,  0 },
+    { "Browse → Live Channels", "Browse", "Live Channels",  "play.tv",                        1,  1 },
+    { "Activity",               "",       "Activity",       "bell",                           3, -1 },
+    { "Profile",                "",       "Profile",        "person.crop.circle",             4, -1 },
 };
 #define TWAB_LAUNCH_OPT_COUNT (sizeof(kLaunchOpts) / sizeof(kLaunchOpts[0]))
 
@@ -297,11 +220,11 @@ static const TWABLaunchOpt kLaunchOpts[] = {
             // + "Add proxy" row) + status + whitelist
             return self.customProxyEnabled ? (3 + (NSInteger)self.proxies.count + 2) : 4;
         case 2: return [self chatRowCount];
-        case 3: return 2;  // launch dropdown + watch-limit
+        case 3: return 3;  // launch dropdown + watch-limit + stream rewind
         case 4:
         case 5:
         case 6: return (NSInteger)[self declutterRowsForSection:section].count;
-        case 7: return 3;  // Tools: export, import, diagnostics
+        case 7: return 2;  // Tools: export, import
         case 8: return 0;  // version footer only
         default: return 0;
     }
@@ -392,7 +315,7 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                 return [self proxyWhitelistCell];
             }
             NSInteger proxyIdx = [self proxyIndexForRow:row];
-            if (proxyIdx >= 0) return [self proxyRowCellForIndex:proxyIdx];
+            if (proxyIdx >= 0) return [self proxyMenuRowCellForIndex:proxyIdx inPlace:nil];
             if (row == [self addProxyRowIndex]) return [self addProxyCell];
             if (row == [self statusRowIndex]) return [self proxyStatusCell];
             return [self proxyWhitelistCell];
@@ -414,14 +337,6 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                          action:@selector(emotesSwitchChanged:)
                                      identifier:@"EmotesSwitch"];
             if (indexPath.row == 2)
-                return [self switchCellWithTitle:LOC(@"settings.fitwideemotes.title",
-                                                     @"Keep Wide Emote Shape")
-                                        subtitle:LOC(@"settings.fitwideemotes.desc",
-                                                     @"Show wide 7TV, BTTV & FFZ emotes at their real shape (smaller) instead of squished into a square.")
-                                             on:[tweakDefaults boolForKey:TWABKeyFitWideEmotes]
-                                         action:@selector(fitWideEmotesSwitchChanged:)
-                                     identifier:@"FitWideEmotesSwitch"];
-            if (indexPath.row == 3)
                 return [self switchCellWithTitle:LOC(@"settings.keepdeleted.title",
                                                      @"Keep Deleted Messages")
                                         subtitle:LOC(@"settings.keepdeleted.desc",
@@ -429,27 +344,21 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                              on:[tweakDefaults boolForKey:TWABKeyKeepDeletedMessages]
                                          action:@selector(keepDeletedSwitchChanged:)
                                      identifier:@"KeepDeletedSwitch"];
-            if (indexPath.row == 4 && [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages])
-                return [self switchCellWithTitle:LOC(@"settings.highlightdeleted.title",
-                                                     @"Highlight Notes")
-                                        subtitle:LOC(@"settings.highlightdeleted.desc",
-                                                     @"Show the deleted / timed-out / banned notes with a highlighted background so they stand out.")
-                                             on:[tweakDefaults boolForKey:TWABKeyHighlightDeletedNotes]
-                                         action:@selector(highlightDeletedSwitchChanged:)
-                                     identifier:@"HighlightDeletedSwitch"];
-            {
-                NSInteger emoteRow = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 5 : 4;
-                if (indexPath.row == emoteRow)
-                    return [self emoteSizeCell];
-                if (indexPath.row == emoteRow + 1)
-                    return [self textSizeCell];
-            }
+            if (indexPath.row == 3) return [self emoteSizeCell];
+            if (indexPath.row == 4) return [self textSizeCell];
             return [self actionCellWithTitle:LOC(@"settings.emotes.reload", @"Reload Emotes")
                                     subtitle:LOC(@"settings.emotes.reload.desc",
                                                  @"Clear the cache and re-fetch all emote sets.")
                                  destructive:NO disclosure:NO identifier:@"ReloadEmotesCell"];
         case 3:
             if (indexPath.row == 0) return [self launchScreenDropdownCell];
+            if (indexPath.row == 2)
+                return [self switchCellWithTitle:LOC(@"settings.streamrewind.title", @"Stream Rewind (Experimental)")
+                                        subtitle:LOC(@"settings.streamrewind.desc2",
+                                                     @"An unreleased Twitch feature: rewind live streams right in the player, double-tap to skip, and jump back to live. Works on channels that save past broadcasts. Twitch hasn't finished it yet, so expect the odd bug.")
+                                             on:[tweakDefaults boolForKey:TWABKeyStreamRewind]
+                                         action:@selector(streamRewindSwitchChanged:)
+                                     identifier:@"StreamRewindSwitch"];
             return [self switchCellWithTitle:LOC(@"settings.watchlimit.title",
                                                  @"Keep Live Feed Playing")
                                     subtitle:LOC(@"settings.watchlimit.desc",
@@ -467,15 +376,10 @@ static const TWABLaunchOpt kLaunchOpts[] = {
                                         subtitle:LOC(@"settings.tools.export.desc",
                                                      @"Share your toggles and proxy list as JSON.")
                                      destructive:NO disclosure:NO identifier:@"ExportCell"];
-            if (indexPath.row == 1)
-                return [self actionCellWithTitle:LOC(@"settings.tools.import", @"Import Settings")
-                                        subtitle:LOC(@"settings.tools.import.desc",
-                                                     @"Select a previously exported JSON file.")
-                                     destructive:NO disclosure:NO identifier:@"ImportCell"];
-            return [self actionCellWithTitle:LOC(@"settings.tools.diag", @"Diagnostics")
-                                    subtitle:LOC(@"settings.tools.diag.desc",
-                                                 @"Check which Twitch hooks resolved on this version.")
-                                 destructive:NO disclosure:YES identifier:@"DiagCell"];
+            return [self actionCellWithTitle:LOC(@"settings.tools.import", @"Import Settings")
+                                    subtitle:LOC(@"settings.tools.import.desc",
+                                                 @"Select a previously exported JSON file.")
+                                 destructive:NO disclosure:NO identifier:@"ImportCell"];
         default: break;
     }
     return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
@@ -495,30 +399,195 @@ static const TWABLaunchOpt kLaunchOpts[] = {
     return 0;
 }
 
-- (UITableViewCell *)launchScreenDropdownCell {
-    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"LaunchDropdown"];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
-                                      reuseIdentifier:@"LaunchDropdown"];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+static const NSInteger kTWABMenuOverlayTag = 0x74776d31;
+
+// What the row shows on the right: "Home · Live", "Activity", "Twitch Default".
+static NSString *twab_launchOptLabel(NSUInteger i) {
+    const TWABLaunchOpt *o = &kLaunchOpts[i];
+    NSString *name = [NSString stringWithUTF8String:o->name];
+    if (o->group[0] == '\0' || o->group[0] == '*') return name;
+    return [NSString stringWithFormat:@"%s · %@", o->group, name];
+}
+
+// The row's value plus an up/down chevron, like iOS Settings' pop-up rows
+// (or another symbol, e.g. "ellipsis.circle" for a row of actions).
+static NSAttributedString *twab_menuValueTextWithSymbol(NSString *value, NSString *symbol);
+static NSAttributedString *twab_menuValueTextWithSymbol(NSString *value, NSString *symbol) {
+    UIColor *color = [UIColor secondaryLabelColor];
+    BOOL actions = [symbol hasPrefix:@"ellipsis"];
+    NSMutableAttributedString *s = [[NSMutableAttributedString alloc]
+        initWithString:value.length ? [value stringByAppendingString:@" "] : @""
+            attributes:@{ NSFontAttributeName : [UIFont systemFontOfSize:15],
+                          NSForegroundColorAttributeName : color }];
+    UIImageSymbolConfiguration *cfg =
+        [UIImageSymbolConfiguration configurationWithPointSize:actions ? 17 : ([symbol isEqualToString:@"chevron.right"] ? 12 : 11)
+                                                        weight:actions ? UIImageSymbolWeightRegular
+                                                                       : UIImageSymbolWeightSemibold];
+    UIImage *chevron = [[UIImage systemImageNamed:symbol withConfiguration:cfg]
+        imageWithTintColor:color renderingMode:UIImageRenderingModeAlwaysOriginal];
+    if (chevron) {
+        NSTextAttachment *att = [NSTextAttachment new];
+        att.image = chevron;
+        att.bounds = CGRectMake(0, actions ? -3 : -1, chevron.size.width, chevron.size.height);
+        [s appendAttributedString:[NSAttributedString attributedStringWithAttachment:att]];
     }
-    NSString *title = LOC(@"settings.launch.title", @"Launch Screen");
-    NSString *detail = [NSString stringWithUTF8String:
-        kLaunchOpts[[self currentLaunchOptIndex]].title];
+    return s;
+}
+
+// Turns a row into a pop-up menu row: the value and an up/down chevron sit on
+// the right, and (iOS 14+) a clear button over the whole row opens `menu`
+// right at the row. Returns NO on iOS 13, where the row keeps its
+// tap-to-open sheet (didSelectRow).
+- (BOOL)twab_setMenu:(id)menu value:(NSString *)value onCell:(UITableViewCell *)cell {
+    return [self twab_setMenu:menu value:value symbol:@"chevron.up.chevron.down" onCell:cell];
+}
+
+- (BOOL)twab_setMenu:(id)menu value:(NSString *)value symbol:(NSString *)symbol onCell:(UITableViewCell *)cell {
+    UILabel *label = [cell.accessoryView isKindOfClass:UILabel.class] ? (UILabel *)cell.accessoryView : nil;
+    if (!label) {
+        label = [UILabel new];
+        label.userInteractionEnabled = NO;
+        cell.accessoryView = label;
+    }
+    label.attributedText = twab_menuValueTextWithSymbol(value, symbol);
+    [label sizeToFit];
+    // respondsToSelector: rather than @available (crashes when sideloaded).
+    if (!menu || ![UIButton instancesRespondToSelector:@selector(setShowsMenuAsPrimaryAction:)]) return NO;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+    UIButton *overlay = (UIButton *)[cell viewWithTag:kTWABMenuOverlayTag];
+    if (!overlay) {
+        overlay = [UIButton buttonWithType:UIButtonTypeCustom];
+        overlay.tag = kTWABMenuOverlayTag;
+        overlay.frame = cell.bounds;
+        overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        overlay.showsMenuAsPrimaryAction = YES;
+        if ([overlay respondsToSelector:@selector(setPreferredMenuElementOrder:)])
+            overlay.preferredMenuElementOrder = UIContextMenuConfigurationElementOrderFixed;
+        [cell addSubview:overlay];
+    }
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    overlay.menu = menu;
+    overlay.accessibilityValue = value;
+    [cell bringSubviewToFront:overlay];
+#pragma clang diagnostic pop
+    return YES;
+}
+
+// The look every row shares: the title, and under it a grey 12pt description
+// (or a coloured status line when `color` is given).
+- (void)twab_styleCell:(UITableViewCell *)cell title:(NSString *)title
+              subtitle:(id)subtitle color:(UIColor *)color titleColor:(UIColor *)titleColor {
     if ([cell respondsToSelector:@selector(defaultContentConfiguration)]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
         UIListContentConfiguration *cfg = [cell defaultContentConfiguration];
         cfg.text = title;
-        cfg.secondaryText = detail;
+        if (titleColor) cfg.textProperties.color = titleColor;
+        if ([subtitle isKindOfClass:NSAttributedString.class]) cfg.secondaryAttributedText = subtitle;
+        else cfg.secondaryText = subtitle;
+        cfg.secondaryTextProperties.color = color ?: [UIColor secondaryLabelColor];
+        cfg.secondaryTextProperties.font = color ? [UIFont systemFontOfSize:12 weight:UIFontWeightMedium]
+                                                 : [UIFont systemFontOfSize:12];
+        cfg.textToSecondaryTextVerticalPadding = 2;
         [cell setContentConfiguration:cfg];
 #pragma clang diagnostic pop
     } else {
         cell.textLabel.text = title;
-        cell.detailTextLabel.text = detail;
+        if (titleColor) cell.textLabel.textColor = titleColor;
+        if ([subtitle isKindOfClass:NSAttributedString.class]) cell.detailTextLabel.attributedText = subtitle;
+        else cell.detailTextLabel.text = subtitle;
+        cell.detailTextLabel.numberOfLines = 0;
+        cell.detailTextLabel.textColor = color ?: [UIColor grayColor];
     }
+}
+
+// A row that opens an editor or another screen: value and › on the right.
+- (void)twab_setDisclosureValue:(NSString *)value onCell:(UITableViewCell *)cell {
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    [self twab_setMenu:nil value:value symbol:@"chevron.right" onCell:cell];
+}
+
+// Sets a menu action's grey second line (iOS 15+).
+static void twab_setMenuSubtitle(id action, NSString *subtitle) {
+    if (subtitle.length && [action respondsToSelector:NSSelectorFromString(@"setSubtitle:")])
+        [action setValue:subtitle forKey:@"subtitle"];
+}
+
+- (void)applyLaunchOpt:(NSUInteger)i {
+    if (i >= TWAB_LAUNCH_OPT_COUNT) return;
+    NSInteger tab = kLaunchOpts[i].tabIndex;
+    NSInteger sub = kLaunchOpts[i].subTabIndex;
+    if (tab < 0) [tweakDefaults removeObjectForKey:TWABKeyLaunchTab];
+    else         [tweakDefaults setInteger:tab forKey:TWABKeyLaunchTab];
+    if (sub < 0) [tweakDefaults removeObjectForKey:TWABKeyLaunchSubTab];
+    else         [tweakDefaults setInteger:sub forKey:TWABKeyLaunchSubTab];
+    [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:0 inSection:3]]
+                          withRowAnimation:UITableViewRowAnimationNone];
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+// Native pull-down menu (iOS 14+): Default, then Home and Browse sections
+// with headers, then Activity / Profile; the current choice gets the system
+// checkmark.
+- (UIMenu *)launchScreenMenu {
+    NSUInteger current = [self currentLaunchOptIndex];
+    NSMutableArray<UIMenuElement *> *sections = [NSMutableArray array];
+    NSMutableArray<UIMenuElement *> *items = [NSMutableArray array];
+    const char *group = NULL;
+    __weak typeof(self) weakSelf = self;
+    for (NSUInteger i = 0; i <= TWAB_LAUNCH_OPT_COUNT; i++) {
+        BOOL flush = i == TWAB_LAUNCH_OPT_COUNT || (group && strcmp(group, kLaunchOpts[i].group) != 0);
+        if (flush && items.count) {
+            NSString *header = (group[0] == '\0' || group[0] == '*') ? @"" : [NSString stringWithUTF8String:group];
+            [sections addObject:[UIMenu menuWithTitle:header image:nil identifier:nil
+                                              options:UIMenuOptionsDisplayInline children:items]];
+            items = [NSMutableArray array];
+        }
+        if (i == TWAB_LAUNCH_OPT_COUNT) break;
+        group = kLaunchOpts[i].group;
+        UIAction *a = [UIAction actionWithTitle:[NSString stringWithUTF8String:kLaunchOpts[i].name]
+                                          image:[UIImage systemImageNamed:[NSString stringWithUTF8String:kLaunchOpts[i].symbol]]
+                                     identifier:nil
+                                        handler:^(__kindof UIAction *_) {
+            dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf applyLaunchOpt:i]; });
+        }];
+        a.state = i == current ? UIMenuElementStateOn : UIMenuElementStateOff;
+        [items addObject:a];
+    }
+    return [UIMenu menuWithTitle:@"" children:sections];
+}
+
+- (UITableViewCell *)launchScreenDropdownCell {
+    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"LaunchDropdown"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                      reuseIdentifier:@"LaunchDropdown"];
+    }
+    NSString *title = LOC(@"settings.launch.title", @"Launch Screen");
+    NSString *subtitle = LOC(@"settings.launch.desc", @"The tab Twitch opens on.");
+    if ([cell respondsToSelector:@selector(defaultContentConfiguration)]) {
+        UIListContentConfiguration *cfg = [cell defaultContentConfiguration];
+        cfg.text = title;
+        cfg.secondaryText = subtitle;
+        cfg.secondaryTextProperties.color = [UIColor secondaryLabelColor];
+        cfg.secondaryTextProperties.font = [UIFont systemFontOfSize:12];
+        cfg.textToSecondaryTextVerticalPadding = 2;
+        [cell setContentConfiguration:cfg];
+    } else {
+        cell.textLabel.text = title;
+        cell.detailTextLabel.text = subtitle;
+        cell.detailTextLabel.textColor = [UIColor grayColor];
+    }
+    BOOL nativeMenu = [UIButton instancesRespondToSelector:@selector(setShowsMenuAsPrimaryAction:)];
+    [self twab_setMenu:(nativeMenu ? [self launchScreenMenu] : nil)
+                 value:twab_launchOptLabel([self currentLaunchOptIndex])
+                onCell:cell];
     return cell;
 }
+#pragma clang diagnostic pop
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
@@ -534,11 +603,17 @@ static const TWABLaunchOpt kLaunchOpts[] = {
     }
     if (indexPath.section == 1 && self.adblockEnabled && self.proxyEnabled &&
         self.customProxyEnabled && indexPath.row == [self addProxyRowIndex]) {
-        [self.proxies addObject:@""];
-        [self saveProxiesToDefaults];
-        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
-                      withRowAnimation:UITableViewRowAnimationAutomatic];
+        [self presentProxyEditorForIndex:-1];
         return;
+    }
+    if (indexPath.section == 1 && self.customProxyEnabled && [self proxyIndexForRow:indexPath.row] >= 0) {
+        [self presentProxyEditorForIndex:[self proxyIndexForRow:indexPath.row]];
+        return;
+    }
+    if (indexPath.section == 2 &&
+        ![UIButton instancesRespondToSelector:@selector(setShowsMenuAsPrimaryAction:)]) {
+        if (indexPath.row == 3) { [self stepScaleForKey:TWABKeyChatEmoteScale]; return; }
+        if (indexPath.row == 4) { [self stepScaleForKey:TWABKeyChatTextScale]; return; }
     }
     if (indexPath.section == 2 && indexPath.row == [self chatRowCount] - 1) {
         [self reloadEmotesTapped:[tableView cellForRowAtIndexPath:indexPath]];
@@ -551,10 +626,8 @@ static const TWABLaunchOpt kLaunchOpts[] = {
     if (indexPath.section == 7) {
         if (indexPath.row == 0)
             [self exportSettings:[tableView cellForRowAtIndexPath:indexPath]];
-        else if (indexPath.row == 1)
-            [self importSettings];
         else
-            [self showDiagnostics];
+            [self importSettings];
     }
 }
 
@@ -610,76 +683,6 @@ static const TWABLaunchOpt kLaunchOpts[] = {
     sheet.popoverPresentationController.sourceRect = anchor.bounds;
     [self presentViewController:sheet animated:YES completion:nil];
 }
-
-#pragma mark - Pinned messages dismiss delay
-
-static const NSInteger kPinnedDismissOptions[] = { 0, 5, 10, 15, 30 };
-static const char *kPinnedDismissTitles[] = { "Never", "5 seconds", "10 seconds", "15 seconds", "30 seconds" };
-#define TWAB_PINNED_OPT_COUNT (sizeof(kPinnedDismissOptions) / sizeof(kPinnedDismissOptions[0]))
-
-- (NSUInteger)currentPinnedDismissIndex {
-    NSInteger saved = [tweakDefaults integerForKey:TWABKeyDismissPinnedSeconds];
-    for (NSUInteger i = 0; i < TWAB_PINNED_OPT_COUNT; i++) {
-        if (kPinnedDismissOptions[i] == saved) return i;
-    }
-    return 0;
-}
-
-- (UITableViewCell *)pinnedDismissDropdownCell {
-    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"PinnedDismiss"];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
-                                      reuseIdentifier:@"PinnedDismiss"];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    }
-    NSString *title = LOC(@"settings.dismisspinned.title", @"Auto-Dismiss Community Highlights");
-    NSString *detail = [NSString stringWithUTF8String:
-        kPinnedDismissTitles[[self currentPinnedDismissIndex]]];
-    if ([cell respondsToSelector:@selector(defaultContentConfiguration)]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunguarded-availability-new"
-        UIListContentConfiguration *cfg = [cell defaultContentConfiguration];
-        cfg.text = title;
-        cfg.secondaryText = detail;
-        [cell setContentConfiguration:cfg];
-#pragma clang diagnostic pop
-    } else {
-        cell.textLabel.text = title;
-        cell.detailTextLabel.text = detail;
-    }
-    return cell;
-}
-
-- (void)presentPinnedDismissPicker:(UIView *)anchor {
-    UIAlertController *sheet = [UIAlertController
-        alertControllerWithTitle:LOC(@"settings.dismisspinned.title", @"Auto-Dismiss Community Highlights")
-                         message:LOC(@"settings.dismisspinned.desc",
-                                     @"Automatically dismiss community highlights (pinned messages) after a delay.")
-                  preferredStyle:UIAlertControllerStyleActionSheet];
-    NSUInteger current = [self currentPinnedDismissIndex];
-    for (NSUInteger i = 0; i < TWAB_PINNED_OPT_COUNT; i++) {
-        NSString *title = [NSString stringWithUTF8String:kPinnedDismissTitles[i]];
-        if (i == current) title = [@"✓  " stringByAppendingString:title];
-        NSInteger seconds = kPinnedDismissOptions[i];
-        __weak typeof(self) weakSelf = self;
-        [sheet addAction:[UIAlertAction actionWithTitle:title
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *_) {
-            [tweakDefaults setInteger:seconds forKey:TWABKeyDismissPinnedSeconds];
-            [weakSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:5]
-                              withRowAnimation:UITableViewRowAnimationNone];
-        }]];
-    }
-    [sheet addAction:[UIAlertAction actionWithTitle:LOC(@"settings.launch.cancel", @"Cancel")
-                                              style:UIAlertActionStyleCancel
-                                            handler:nil]];
-    sheet.popoverPresentationController.sourceView = anchor;
-    sheet.popoverPresentationController.sourceRect = anchor.bounds;
-    [self presentViewController:sheet animated:YES completion:nil];
-}
-
-// Tag for finding the proxy text field on a reused cell. Arbitrary but distinct.
-static const NSInteger kProxyTextFieldTag = 0xABCD;
 
 - (UITableViewCell *)switchCellWithTitle:(NSString *)title
                                 subtitle:(NSString *)subtitle
@@ -774,8 +777,8 @@ static const NSInteger kProxyTextFieldTag = 0xABCD;
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
                                       reuseIdentifier:identifier];
     }
-    cell.accessoryType = disclosure ? UITableViewCellAccessoryDisclosureIndicator
-                                    : UITableViewCellAccessoryNone;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    if (disclosure) [self twab_setDisclosureValue:nil onCell:cell];
     cell.accessibilityIdentifier = identifier;
     UIColor *titleColor = destructive ? [UIColor systemRedColor]
                                       : (self.view.tintColor ?: [UIColor systemBlueColor]);
@@ -846,6 +849,21 @@ static const NSInteger kProxyTextFieldTag = 0xABCD;
             color  = [UIColor systemGrayColor];
             break;
     }
+    if (!self.customProxyEnabled) return [self defaultProxyMenuCellWithStatus:detail color:color];
+    // Custom: same layout as Default Proxy, status under the title.
+    UITableViewCell *custom = [self.tableView dequeueReusableCellWithIdentifier:@"CustomProxyStatusCell"];
+    if (!custom) {
+        custom = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                        reuseIdentifier:@"CustomProxyStatusCell"];
+        custom.selectionStyle = UITableViewCellSelectionStyleNone;
+    }
+    if (!self.proxies.count) {
+        detail = LOC(@"settings.proxy.custom.none2", @"No proxies added yet");
+        color = [UIColor secondaryLabelColor];
+    }
+    [self twab_styleCell:custom title:LOC(@"settings.proxy.custom.status", @"Your Proxies")
+                subtitle:detail color:color titleColor:nil];
+    return custom;
     if ([cell respondsToSelector:@selector(defaultContentConfiguration)]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
@@ -863,7 +881,130 @@ static const NSInteger kProxyTextFieldTag = 0xABCD;
     return cell;
 }
 
-// Pick the built-in proxy by country, or Automatic. A choice is a
+// Set while reloadStatusRow refreshes the visible row in place, so a status
+// update doesn't close the menu if it's open.
+static UITableViewCell *twab_inPlaceProxyCell;
+
+static BOOL twab_hasDeferredMenus(void) {
+    return [NSClassFromString(@"UIDeferredMenuElement")
+        respondsToSelector:NSSelectorFromString(@"elementWithUncachedProvider:")];
+}
+
+// "Default Proxy" with the live status under it and the choice on the right;
+// tapping opens the country menu.
+- (UITableViewCell *)defaultProxyMenuCellWithStatus:(NSString *)status color:(UIColor *)color {
+    BOOL inPlace = twab_inPlaceProxyCell != nil;
+    UITableViewCell *cell = twab_inPlaceProxyCell
+        ?: [self.tableView dequeueReusableCellWithIdentifier:@"DefaultProxyMenuCell"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                      reuseIdentifier:@"DefaultProxyMenuCell"];
+    }
+    NSString *title = LOC(@"settings.proxy.pick.title", @"Default Proxy");
+    if ([cell respondsToSelector:@selector(defaultContentConfiguration)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+        UIListContentConfiguration *cfg = [cell defaultContentConfiguration];
+        cfg.text = title;
+        cfg.secondaryText = status;
+        cfg.secondaryTextProperties.color = color;
+        cfg.secondaryTextProperties.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        cfg.textToSecondaryTextVerticalPadding = 2;
+        [cell setContentConfiguration:cfg];
+#pragma clang diagnostic pop
+    } else {
+        cell.textLabel.text = title;
+        cell.detailTextLabel.text = status;
+        cell.detailTextLabel.textColor = color;
+    }
+    NSString *chosen = [tweakDefaults stringForKey:TWABKeyPreferredProxy];
+    BOOL nativeMenu = [UIButton instancesRespondToSelector:@selector(setShowsMenuAsPrimaryAction:)];
+    // In place with a live (built-on-open) menu: keep the menu as it is.
+    BOOL keepMenu = inPlace && twab_hasDeferredMenus();
+    [self twab_setMenu:(nativeMenu && !keepMenu ? [self defaultProxyMenu] : nil)
+                 value:chosen.length ? chosen : LOC(@"settings.proxy.automatic", @"Automatic")
+                onCell:cell];
+    return cell;
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+// Automatic first, then each country with its live speed (or Offline /
+// backup note) as a grey second line. Built when the menu opens (iOS 15+),
+// so the speeds are current.
+- (NSArray<UIMenuElement *> *)defaultProxyMenuItems {
+    NSArray<NSString *> *names = twab_defaultProxyNames();
+    NSArray<NSString *> *addresses = twab_effectiveProxyAddresses();
+    NSString *chosen = [tweakDefaults stringForKey:TWABKeyPreferredProxy] ?: @"";
+    __weak typeof(self) weakSelf = self;
+    void (^choose)(NSString *) = ^(NSString *name) {
+        if (name.length) [tweakDefaults setObject:name forKey:TWABKeyPreferredProxy];
+        else [tweakDefaults removeObjectForKey:TWABKeyPreferredProxy];
+        twab_proxyPoolResetPick();
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf reloadStatusRow]; });
+    };
+    UIAction *automatic = [UIAction actionWithTitle:LOC(@"settings.proxy.automatic", @"Automatic")
+                                              image:[UIImage systemImageNamed:@"sparkles"]
+                                         identifier:nil
+                                            handler:^(__kindof UIAction *_) { choose(nil); }];
+    twab_setMenuSubtitle(automatic, LOC(@"settings.proxy.automatic.sub", @"Recommended · uses the best servers for you"));
+    automatic.state = chosen.length ? UIMenuElementStateOff : UIMenuElementStateOn;
+
+    NSMutableArray<UIMenuElement *> *countries = [NSMutableArray array];
+    NSSet *backups = twab_backupOnlyProxyAddresses();
+    for (NSUInteger i = 0; i < names.count && i < addresses.count; i++) {
+        NSString *name = names[i];
+        NSDictionary *info = twab_proxyPoolInfo(addresses[i]);
+        NSString *state;
+        NSString *symbol;
+        if (!info[@"up"]) {
+            state = LOC(@"settings.proxy.status.notchecked", @"Not checked yet");
+            symbol = @"circle.dashed";
+        } else if (![info[@"up"] boolValue] || [info[@"benched"] boolValue]) {
+            state = LOC(@"settings.proxy.status.offline.plain", @"Offline");
+            symbol = @"wifi.slash";
+        } else {
+            state = [NSString stringWithFormat:@"%.0f ms", [info[@"latencyMs"] doubleValue]];
+            symbol = @"globe";
+        }
+        if ([backups containsObject:addresses[i]])
+            state = [state stringByAppendingString:LOC(@"settings.proxy.backup720", @" · backup, up to 720p")];
+        UIAction *a = [UIAction actionWithTitle:name
+                                          image:[UIImage systemImageNamed:symbol]
+                                     identifier:nil
+                                        handler:^(__kindof UIAction *_) { choose(name); }];
+        twab_setMenuSubtitle(a, state);
+        // iOS 14 has no subtitles, so the state goes in the title there.
+        if (![a respondsToSelector:NSSelectorFromString(@"setSubtitle:")])
+            a.title = [NSString stringWithFormat:@"%@ · %@", name, state];
+        a.state = [chosen isEqualToString:name] ? UIMenuElementStateOn : UIMenuElementStateOff;
+        [countries addObject:a];
+    }
+    NSMutableArray<UIMenuElement *> *out = [NSMutableArray array];
+    [out addObject:[UIMenu menuWithTitle:@"" image:nil identifier:nil
+                                 options:UIMenuOptionsDisplayInline children:@[automatic]]];
+    if (countries.count)
+        [out addObject:[UIMenu menuWithTitle:LOC(@"settings.proxy.pick.header",
+                                                 @"If your pick goes down, another server takes over until it's back.")
+                                       image:nil identifier:nil
+                                     options:UIMenuOptionsDisplayInline children:countries]];
+    return out;
+}
+
+- (UIMenu *)defaultProxyMenu {
+    if (twab_hasDeferredMenus()) {
+        __weak typeof(self) weakSelf = self;
+        UIMenuElement *live = [UIDeferredMenuElement elementWithUncachedProvider:
+            ^(void (^completion)(NSArray<UIMenuElement *> *)) {
+                completion([weakSelf defaultProxyMenuItems] ?: @[]);
+            }];
+        return [UIMenu menuWithTitle:@"" children:@[live]];
+    }
+    return [UIMenu menuWithTitle:@"" children:[self defaultProxyMenuItems]];
+}
+#pragma clang diagnostic pop
+
+// Pick the built-in proxy by country, or Automatic (iOS 13 fallback). A choice is a
 // preference: if that proxy is down, the app still uses another one.
 - (void)presentDefaultProxyPicker:(UIView *)anchor {
     NSArray<NSString *> *names = twab_defaultProxyNames();
@@ -912,136 +1053,132 @@ static const NSInteger kProxyTextFieldTag = 0xABCD;
 - (UITableViewCell *)proxyWhitelistCell {
     UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"ProxyWhitelistCell"];
     if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
                                       reuseIdentifier:@"ProxyWhitelistCell"];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     }
-    NSString *raw = [tweakDefaults stringForKey:TWABKeyProxyWhitelist];
-    NSString *detail = raw.length ? raw : @"None";
+    NSMutableArray<NSString *> *channels = [NSMutableArray array];
+    for (NSString *c in [[tweakDefaults stringForKey:TWABKeyProxyWhitelist] ?: @"" componentsSeparatedByString:@","]) {
+        NSString *t = [c stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (t.length) [channels addObject:t];
+    }
+    NSString *subtitle = channels.count
+        ? [channels componentsJoinedByString:@", "]
+        : LOC(@"settings.whitelist.desc", @"Channels that always play without the proxy.");
+    [self twab_styleCell:cell title:LOC(@"settings.whitelist.title", @"Skip Proxy for Channels")
+                subtitle:subtitle color:nil titleColor:nil];
     if ([cell respondsToSelector:@selector(defaultContentConfiguration)]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
-        UIListContentConfiguration *cfg = [cell defaultContentConfiguration];
-        cfg.text = @"Skip Proxy for Channels";
-        cfg.secondaryText = detail;
-        cfg.secondaryTextProperties.color = [UIColor secondaryLabelColor];
+        UIListContentConfiguration *cfg = (UIListContentConfiguration *)cell.contentConfiguration;
+        cfg.secondaryTextProperties.numberOfLines = 2;
+        cfg.secondaryTextProperties.lineBreakMode = NSLineBreakByTruncatingTail;
         [cell setContentConfiguration:cfg];
 #pragma clang diagnostic pop
-    } else {
-        cell.textLabel.text = @"Skip Proxy for Channels";
-        cell.detailTextLabel.text = detail;
-        cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
     }
+    NSString *value = channels.count == 0 ? LOC(@"settings.whitelist.none", @"None")
+                    : channels.count == 1 ? @"1 channel"
+                                          : [NSString stringWithFormat:@"%lu channels", (unsigned long)channels.count];
+    [self twab_setDisclosureValue:value onCell:cell];
     return cell;
 }
 
-// Tags for finding the up/down buttons on a reused proxy row cell.
-static const NSInteger kProxyUpButtonTag   = 0xAB01;
-static const NSInteger kProxyDownButtonTag = 0xAB02;
+// One custom proxy: its place in the order as a numbered badge, the server
+// (password left out) and its live speed or Offline under it. Tapping opens
+// Edit / Move Up / Move Down / Delete. inPlace: refresh a visible row without
+// rebuilding it (status updates), keeping its menu as it is.
+- (UITableViewCell *)proxyMenuRowCellForIndex:(NSInteger)idx inPlace:(UITableViewCell *)existing {
+    UITableViewCell *cell = existing ?: [self.tableView dequeueReusableCellWithIdentifier:@"ProxyMenuRowCell"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                      reuseIdentifier:@"ProxyMenuRowCell"];
+    }
+    NSString *raw = idx < (NSInteger)self.proxies.count ? self.proxies[idx] : @"";
+    NSURL *url = twab_normalizedProxyURL(raw);
+    NSString *server = raw;
+    if (url.host.length)
+        server = url.port ? [NSString stringWithFormat:@"%@:%@", url.host, url.port] : url.host;
 
-- (UIButton *)makeArrowButtonNamed:(NSString *)symbolName
-                               tag:(NSInteger)tag
-                            action:(SEL)action {
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    btn.tag = tag;
-    btn.translatesAutoresizingMaskIntoConstraints = NO;
-    if ([UIImage respondsToSelector:@selector(systemImageNamed:)]) {
+    NSDictionary *info = twab_proxyPoolInfo(raw);
+    NSString *state;
+    UIColor *stateColor;
+    if (!url) {
+        state = LOC(@"settings.proxy.invalid", @"Not a valid address");
+        stateColor = [UIColor systemRedColor];
+    } else if (!info[@"up"]) {
+        state = LOC(@"settings.proxy.status.notchecked", @"Not checked yet");
+        stateColor = [UIColor secondaryLabelColor];
+    } else if (![info[@"up"] boolValue] || [info[@"benched"] boolValue]) {
+        state = LOC(@"settings.proxy.status.offline", @"● Offline");
+        stateColor = [UIColor systemRedColor];
+    } else {
+        state = [NSString stringWithFormat:@"● %.0f ms", [info[@"latencyMs"] doubleValue]];
+        stateColor = [UIColor systemGreenColor];
+    }
+
+    NSString *place = [NSString stringWithFormat:LOC(@"settings.proxy.number", @"Proxy %ld"), (long)idx + 1];
+    NSMutableAttributedString *sub = [[NSMutableAttributedString alloc] initWithString:state
+        attributes:@{ NSFontAttributeName : [UIFont systemFontOfSize:12 weight:UIFontWeightMedium],
+                      NSForegroundColorAttributeName : stateColor }];
+    [sub appendAttributedString:[[NSAttributedString alloc]
+        initWithString:[NSString stringWithFormat:@"  ·  %@", place]
+            attributes:@{ NSFontAttributeName : [UIFont systemFontOfSize:12],
+                          NSForegroundColorAttributeName : [UIColor secondaryLabelColor] }]];
+    [self twab_styleCell:cell title:server subtitle:sub color:nil titleColor:nil];
+    if ([cell respondsToSelector:@selector(defaultContentConfiguration)]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
-        UIImageSymbolConfiguration *sym = [UIImageSymbolConfiguration
-            configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
-        UIImage *img = [UIImage systemImageNamed:symbolName withConfiguration:sym];
-        [btn setImage:img forState:UIControlStateNormal];
+        UIListContentConfiguration *cfg = (UIListContentConfiguration *)cell.contentConfiguration;
+        cfg.textProperties.numberOfLines = 1;
+        cfg.textProperties.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        [cell setContentConfiguration:cfg];
 #pragma clang diagnostic pop
-    } else {
-        // Pre-iOS 13 fallback — ASCII arrow as title.
-        NSString *fallback = [symbolName isEqualToString:@"chevron.up"] ? @"▲" : @"▼";
-        [btn setTitle:fallback forState:UIControlStateNormal];
     }
-    [btn addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    return btn;
-}
-
-- (UITableViewCell *)proxyRowCellForIndex:(NSInteger)idx {
-    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"ProxyRowCell"];
-    UIButton *up, *down;
-    UITextField *tf;
-    if (cell) {
-        up   = (UIButton *)[cell.contentView viewWithTag:kProxyUpButtonTag];
-        down = (UIButton *)[cell.contentView viewWithTag:kProxyDownButtonTag];
-        tf   = (UITextField *)[cell.contentView viewWithTag:kProxyTextFieldTag];
-    } else {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                      reuseIdentifier:@"ProxyRowCell"];
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        up   = [self makeArrowButtonNamed:@"chevron.up"
-                                      tag:kProxyUpButtonTag
-                                   action:@selector(proxyUpTapped:)];
-        down = [self makeArrowButtonNamed:@"chevron.down"
-                                      tag:kProxyDownButtonTag
-                                   action:@selector(proxyDownTapped:)];
-        tf = [[UITextField alloc] init];
-        tf.tag = kProxyTextFieldTag;
-        tf.translatesAutoresizingMaskIntoConstraints = NO;
-        tf.placeholder = @"user:pass@host:port";
-        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        tf.keyboardType = UIKeyboardTypeURL;
-        tf.returnKeyType = UIReturnKeyDone;
-        tf.font = [UIFont systemFontOfSize:15];
-        tf.delegate = self;
-        [tf addTarget:self
-                action:@selector(proxyFieldChanged:)
-      forControlEvents:UIControlEventEditingChanged];
-        [cell.contentView addSubview:up];
-        [cell.contentView addSubview:down];
-        [cell.contentView addSubview:tf];
-        [NSLayoutConstraint activateConstraints:@[
-            [up.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:12],
-            [up.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            [up.widthAnchor constraintEqualToConstant:30],
-            [up.heightAnchor constraintEqualToConstant:30],
-            [down.leadingAnchor constraintEqualToAnchor:up.trailingAnchor constant:2],
-            [down.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            [down.widthAnchor constraintEqualToConstant:30],
-            [down.heightAnchor constraintEqualToConstant:30],
-            [tf.leadingAnchor constraintEqualToAnchor:down.trailingAnchor constant:10],
-            [tf.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
-            [tf.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            [tf.heightAnchor constraintEqualToConstant:40],
-        ]];
-    }
-    tf.text = idx < (NSInteger)self.proxies.count ? self.proxies[idx] : @"";
-    // Dim disabled arrows so it's visually clear when a row can't move
-    // further in that direction.
-    BOOL canUp   = (idx > 0);
-    BOOL canDown = (idx < (NSInteger)self.proxies.count - 1);
-    up.enabled   = canUp;   up.alpha   = canUp   ? 1.0 : 0.25;
-    down.enabled = canDown; down.alpha = canDown ? 1.0 : 0.25;
+    BOOL nativeMenu = [UIButton instancesRespondToSelector:@selector(setShowsMenuAsPrimaryAction:)];
+    [self twab_setMenu:(nativeMenu && !existing ? [self proxyRowMenuForIndex:idx] : nil)
+                 value:nil symbol:@"ellipsis.circle" onCell:cell];
+    if (!nativeMenu) [self twab_setDisclosureValue:nil onCell:cell];
     return cell;
 }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+- (UIMenu *)proxyRowMenuForIndex:(NSInteger)idx {
+    __weak typeof(self) weakSelf = self;
+    UIAction *edit = [UIAction actionWithTitle:LOC(@"settings.proxy.edit", @"Edit")
+                                         image:[UIImage systemImageNamed:@"pencil"] identifier:nil
+                                       handler:^(__kindof UIAction *_) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf presentProxyEditorForIndex:idx]; });
+    }];
+    UIAction *up = [UIAction actionWithTitle:LOC(@"settings.proxy.moveup", @"Move Up")
+                                       image:[UIImage systemImageNamed:@"arrow.up"] identifier:nil
+                                     handler:^(__kindof UIAction *_) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf moveProxyAtIndex:idx by:-1]; });
+    }];
+    UIAction *down = [UIAction actionWithTitle:LOC(@"settings.proxy.movedown", @"Move Down")
+                                         image:[UIImage systemImageNamed:@"arrow.down"] identifier:nil
+                                       handler:^(__kindof UIAction *_) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf moveProxyAtIndex:idx by:1]; });
+    }];
+    if (idx <= 0) up.attributes = UIMenuElementAttributesDisabled;
+    if (idx >= (NSInteger)self.proxies.count - 1) down.attributes = UIMenuElementAttributesDisabled;
+    UIAction *del = [UIAction actionWithTitle:LOC(@"settings.proxy.delete", @"Delete")
+                                        image:[UIImage systemImageNamed:@"trash"] identifier:nil
+                                      handler:^(__kindof UIAction *_) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf deleteProxyAtIndex:idx]; });
+    }];
+    del.attributes = UIMenuElementAttributesDestructive;
+    UIMenu *order = [UIMenu menuWithTitle:@"" image:nil identifier:nil
+                                  options:UIMenuOptionsDisplayInline children:@[up, down]];
+    UIMenu *danger = [UIMenu menuWithTitle:@"" image:nil identifier:nil
+                                   options:UIMenuOptionsDisplayInline children:@[del]];
+    return [UIMenu menuWithTitle:@"" children:@[edit, order, danger]];
+}
+#pragma clang diagnostic pop
 
 - (UITableViewCell *)addProxyCell {
-    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"AddProxyCell"];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                      reuseIdentifier:@"AddProxyCell"];
-    }
-    NSString *title = LOC(@"settings.proxy.add", @"+ Add proxy");
-    if ([cell respondsToSelector:@selector(defaultContentConfiguration)]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunguarded-availability-new"
-        UIListContentConfiguration *cfg = [cell defaultContentConfiguration];
-        cfg.text = title;
-        cfg.textProperties.color = self.view.tintColor ?: UIColor.systemBlueColor;
-        [cell setContentConfiguration:cfg];
-#pragma clang diagnostic pop
-    } else {
-        cell.textLabel.text = title;
-        cell.textLabel.textColor = self.view.tintColor ?: UIColor.systemBlueColor;
-    }
-    return cell;
+    return [self actionCellWithTitle:LOC(@"settings.proxy.add.title", @"Add Proxy")
+                            subtitle:LOC(@"settings.proxy.add.desc", @"An HTTP proxy in an ad-free country.")
+                         destructive:NO disclosure:NO identifier:@"AddProxyCell"];
 }
 
 // Walks from any subview up to its enclosing UITableViewCell. Returns nil
@@ -1054,35 +1191,84 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 
 #pragma mark - Multi-proxy editing
 
-- (void)proxyUpTapped:(UIButton *)btn {
-    UITableViewCell *cell = [self cellForSubview:btn];
-    NSIndexPath *path = [self.tableView indexPathForCell:cell];
-    NSInteger idx = [self proxyIndexForRow:path.row];
-    if (idx <= 0) return;
-    [self.proxies exchangeObjectAtIndex:idx withObjectAtIndex:idx - 1];
+- (void)moveProxyAtIndex:(NSInteger)idx by:(NSInteger)delta {
+    NSInteger to = idx + delta;
+    if (idx < 0 || to < 0 || idx >= (NSInteger)self.proxies.count || to >= (NSInteger)self.proxies.count) return;
+    [self.proxies exchangeObjectAtIndex:idx withObjectAtIndex:to];
     [self saveProxiesToDefaults];
-    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
-                  withRowAnimation:UITableViewRowAnimationFade];
+    [self.tableView performBatchUpdates:^{
+        [self.tableView moveRowAtIndexPath:[NSIndexPath indexPathForRow:2 + idx inSection:1]
+                               toIndexPath:[NSIndexPath indexPathForRow:2 + to inSection:1]];
+    } completion:^(BOOL _) {
+        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
+                      withRowAnimation:UITableViewRowAnimationNone];
+    }];
 }
 
-- (void)proxyDownTapped:(UIButton *)btn {
-    UITableViewCell *cell = [self cellForSubview:btn];
-    NSIndexPath *path = [self.tableView indexPathForCell:cell];
-    NSInteger idx = [self proxyIndexForRow:path.row];
-    if (idx < 0 || idx >= (NSInteger)self.proxies.count - 1) return;
-    [self.proxies exchangeObjectAtIndex:idx withObjectAtIndex:idx + 1];
-    [self saveProxiesToDefaults];
-    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
-                  withRowAnimation:UITableViewRowAnimationFade];
-}
-
-- (void)proxyFieldChanged:(UITextField *)tf {
-    UITableViewCell *cell = [self cellForSubview:tf];
-    NSIndexPath *path = [self.tableView indexPathForCell:cell];
-    NSInteger idx = [self proxyIndexForRow:path.row];
+- (void)deleteProxyAtIndex:(NSInteger)idx {
     if (idx < 0 || idx >= (NSInteger)self.proxies.count) return;
-    self.proxies[idx] = tf.text ?: @"";
+    [self.proxies removeObjectAtIndex:idx];
     [self saveProxiesToDefaults];
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
+                  withRowAnimation:UITableViewRowAnimationAutomatic];
+    [self refreshProxyStatus];
+}
+
+// Add (idx < 0) or edit one custom proxy in a small text box.
+- (void)presentProxyEditorForIndex:(NSInteger)idx {
+    [self presentProxyEditorForIndex:idx text:(idx >= 0 && idx < (NSInteger)self.proxies.count)
+                                                  ? self.proxies[idx] : @""
+                               error:nil];
+}
+
+- (void)presentProxyEditorForIndex:(NSInteger)idx text:(NSString *)text error:(NSString *)error {
+    BOOL adding = idx < 0;
+    NSString *message = error ?: LOC(@"settings.proxy.editor.desc",
+        @"An HTTP proxy in an ad-free country, as host:port or user:pass@host:port.");
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:adding ? LOC(@"settings.proxy.add.title", @"Add Proxy")
+                                        : LOC(@"settings.proxy.edit.title", @"Edit Proxy")
+                         message:message
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = text;
+        tf.placeholder = @"user:pass@host:port";
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.spellCheckingType = UITextSpellCheckingTypeNo;
+        tf.keyboardType = UIKeyboardTypeURL;
+        tf.returnKeyType = UIReturnKeyDone;
+    }];
+    __weak typeof(self) weakSelf = self;
+    __weak UIAlertController *weakAlert = alert;
+    [alert addAction:[UIAlertAction actionWithTitle:LOC(@"settings.launch.cancel", @"Cancel")
+                                              style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:adding ? LOC(@"settings.proxy.add.button", @"Add")
+                                                           : LOC(@"settings.proxy.save", @"Save")
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *_) {
+        __strong typeof(weakSelf) self = weakSelf;
+        NSString *value = [weakAlert.textFields.firstObject.text
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
+        NSURL *url = twab_normalizedProxyURL(value);
+        if (!url || !url.port) {
+            NSString *err = LOC(@"settings.proxy.editor.invalid",
+                @"That doesn't look right. Use host:port or user:pass@host:port, e.g. user:pass@1.2.3.4:8000.");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self presentProxyEditorForIndex:idx text:value error:err];
+            });
+            return;
+        }
+        if (adding) [self.proxies addObject:value];
+        else if (idx < (NSInteger)self.proxies.count) self.proxies[idx] = value;
+        [self saveProxiesToDefaults];
+        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
+                      withRowAnimation:UITableViewRowAnimationAutomatic];
+        [self refreshProxyStatus];
+    }]];
+    alert.preferredAction = alert.actions.lastObject;
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 #pragma mark - UITableViewDelegate (footers)
@@ -1118,40 +1304,21 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
         return wrap;
     }
 
-    // Per-mod descriptions now live as subtitles under each switch, so most
-    // section footers are gone. The only footer left is the multi-proxy
-    // reorder/delete mechanics, which describe row interactions rather than a
-    // single toggle and don't fit on one subtitle line.
-    NSString *text = nil;
-    if (section == 1 && self.adblockEnabled && self.proxyEnabled && self.customProxyEnabled) {
-        text = LOC(@"settings.proxy.footer.multi",
-                   @"With more than one proxy, the app checks them in the background, "
-                   @"spreads streams over the ones that work and switches if one goes "
-                   @"down. A V2 / ttv-lol-pro proxy is used first if listed. Use ↑↓ to "
-                   @"reorder, swipe a row to delete.");
-    } else if (section == 4) {
-        text = LOC(@"settings.declutter.stream.footer",
+    // Other footers are plain text (titleForFooterInSection), which iOS
+    // wraps to any length.
+    return nil;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    if (section == 1 && self.adblockEnabled && self.proxyEnabled && self.customProxyEnabled)
+        return LOC(@"settings.proxy.footer.multi2",
+                   @"Streams are spread over the proxies that work, and move off one "
+                   @"that goes down. Tap a proxy to edit, move or delete it.");
+    if (section == 4)
+        return LOC(@"settings.declutter.stream.footer",
                    @"These apply in the channel bar, or in the info panel (tap the video) "
                    @"when the channel bar is hidden.");
-    } else {
-        return nil;
-    }
-
-    UILabel *label = [[UILabel alloc] init];
-    label.text = text;
-    label.numberOfLines = 0;
-    label.font = [UIFont systemFontOfSize:13];
-    label.textColor = [UIColor colorWithWhite:0.5 alpha:1];
-    UIView *wrap = [[UIView alloc] init];
-    [wrap addSubview:label];
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    [NSLayoutConstraint activateConstraints:@[
-        [label.leadingAnchor constraintEqualToAnchor:wrap.leadingAnchor constant:16],
-        [label.trailingAnchor constraintEqualToAnchor:wrap.trailingAnchor constant:-16],
-        [label.topAnchor constraintEqualToAnchor:wrap.topAnchor constant:8],
-        [label.bottomAnchor constraintEqualToAnchor:wrap.bottomAnchor constant:-8],
-    ]];
-    return wrap;
+    return nil;
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
@@ -1164,20 +1331,10 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     return hasFooter ? UITableViewAutomaticDimension : CGFLOAT_MIN;
 }
 
-// Self-size every row to fit its subtitle EXCEPT the proxy editor / add /
-// status rows (section 1, row >= 2): those use centered constraints that
-// don't pin top/bottom, so self-sizing would collapse them. They keep a
-// fixed height. Toggles, action rows, and the launch dropdown all self-size.
+// Every row sizes itself to its title and subtitle.
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     // The status and Skip Proxy rows use the standard content layout, so they
     // size to the text (a fixed 44pt cut off descenders at larger text sizes).
-    if (indexPath.section == 1 && indexPath.row >= 2 &&
-        indexPath.row < [self statusRowIndex]) return 44.0;
-    if (indexPath.section == 2) {
-        NSInteger emoteRow = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 5 : 4;
-        NSInteger textRow = emoteRow + 1;
-        if (indexPath.row == emoteRow || indexPath.row == textRow) return 70.0;
-    }
     return UITableViewAutomaticDimension;
 }
 
@@ -1205,12 +1362,10 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     if (sw.on) [self refreshProxyStatus];
 }
 
-// Emotes section rows: 3rd-party emotes, keep wide emote shape,
-// keep deleted messages, [highlight notes — only while keep deleted messages
-// is on], reload emotes (always last).
+// Chat rows: auto-claim, 3rd-party emotes, keep deleted messages, emote
+// size, text size, reload emotes (always last).
 - (NSInteger)chatRowCount {
-    NSInteger base = [tweakDefaults boolForKey:TWABKeyKeepDeletedMessages] ? 6 : 5;
-    return base + 2; // emote size + text size selectors
+    return 6;
 }
 
 // Declutter rows, grouped by where each item shows up. Names map to cells in
@@ -1272,10 +1427,10 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
 
 - (void)keepDeletedSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyKeepDeletedMessages];
-    // Show / hide the Highlight Notes sub-setting under it.
-    NSIndexPath *sub = [NSIndexPath indexPathForRow:4 inSection:2];
-    if (sw.on) [self.tableView insertRowsAtIndexPaths:@[sub] withRowAnimation:UITableViewRowAnimationFade];
-    else       [self.tableView deleteRowsAtIndexPaths:@[sub] withRowAnimation:UITableViewRowAnimationFade];
+}
+
+- (void)streamRewindSwitchChanged:(UISwitch *)sw {
+    [tweakDefaults setBool:sw.on forKey:TWABKeyStreamRewind];
 }
 
 - (void)blockTrackingSwitchChanged:(UISwitch *)sw {
@@ -1362,13 +1517,6 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     twab_applySettingsLive();
 }
 
-- (void)fitWideEmotesSwitchChanged:(UISwitch *)sw {
-    [tweakDefaults setBool:sw.on forKey:TWABKeyFitWideEmotes];
-}
-
-- (void)highlightDeletedSwitchChanged:(UISwitch *)sw {
-    [tweakDefaults setBool:sw.on forKey:TWABKeyHighlightDeletedNotes];
-}
 
 - (void)hidePickerButtonSwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyHidePickerButton];
@@ -1394,73 +1542,68 @@ static const NSInteger kProxyDownButtonTag = 0xAB02;
     [tweakDefaults setBool:sw.on forKey:TWABKeyHideAdFreeButton];
 }
 
-- (UITableViewCell *)emoteSizeCell {
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                                   reuseIdentifier:nil];
-    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+static const char *kChatScaleTitles[] = { "Default", "Large", "Extra Large" };
 
-    UILabel *title = [UILabel new];
-    title.text = @"Emote Size";
-    title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    title.translatesAutoresizingMaskIntoConstraints = NO;
-
-    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Default", @"Large", @"Extra Large"]];
-    NSInteger idx = [tweakDefaults integerForKey:TWABKeyChatEmoteScale];
-    if (idx < 0 || idx > 2) idx = 0;
-    seg.selectedSegmentIndex = idx;
-    [seg addTarget:self action:@selector(emoteSizeChanged:) forControlEvents:UIControlEventValueChanged];
-    seg.translatesAutoresizingMaskIntoConstraints = NO;
-
-    [cell.contentView addSubview:title];
-    [cell.contentView addSubview:seg];
-    [NSLayoutConstraint activateConstraints:@[
-        [title.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-        [title.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
-        [seg.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-        [seg.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
-        [seg.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:8],
-    ]];
+// Emote Size / Chat Text Size: a menu row like Launch Screen.
+- (UITableViewCell *)scaleMenuCellWithTitle:(NSString *)title subtitle:(NSString *)subtitle
+                                        key:(NSString *)key identifier:(NSString *)identifier {
+    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    }
+    [self twab_styleCell:cell title:title subtitle:subtitle color:nil titleColor:nil];
+    NSInteger current = [tweakDefaults integerForKey:key];
+    if (current < 0 || current > 2) current = 0;
+    id menu = nil;
+    if ([UIButton instancesRespondToSelector:@selector(setShowsMenuAsPrimaryAction:)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+        NSArray *symbols = @[@"textformat.size.smaller", @"textformat.size", @"textformat.size.larger"];
+        NSMutableArray *items = [NSMutableArray array];
+        __weak typeof(self) weakSelf = self;
+        for (NSInteger i = 0; i < 3; i++) {
+            UIAction *a = [UIAction actionWithTitle:[NSString stringWithUTF8String:kChatScaleTitles[i]]
+                                              image:[UIImage systemImageNamed:symbols[i]]
+                                         identifier:nil
+                                            handler:^(__kindof UIAction *_) {
+                [tweakDefaults setInteger:i forKey:key];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [weakSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:2]
+                                      withRowAnimation:UITableViewRowAnimationNone];
+                });
+            }];
+            a.state = i == current ? UIMenuElementStateOn : UIMenuElementStateOff;
+            [items addObject:a];
+        }
+        menu = [UIMenu menuWithTitle:@"" children:items];
+#pragma clang diagnostic pop
+    }
+    [self twab_setMenu:menu value:[NSString stringWithUTF8String:kChatScaleTitles[current]] onCell:cell];
     return cell;
 }
 
-- (void)emoteSizeChanged:(UISegmentedControl *)seg {
-    [tweakDefaults setInteger:seg.selectedSegmentIndex forKey:TWABKeyChatEmoteScale];
+- (UITableViewCell *)emoteSizeCell {
+    return [self scaleMenuCellWithTitle:LOC(@"settings.emotesize.title", @"Emote Size")
+                               subtitle:LOC(@"settings.emotesize.desc", @"How big emotes are in chat.")
+                                    key:TWABKeyChatEmoteScale identifier:@"EmoteSizeCell"];
 }
 
 - (UITableViewCell *)textSizeCell {
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                                   reuseIdentifier:nil];
-    cell.selectionStyle = UITableViewCellSelectionStyleNone;
-
-    UILabel *title = [UILabel new];
-    title.text = @"Chat Text Size";
-    title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    title.translatesAutoresizingMaskIntoConstraints = NO;
-
-    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Default", @"Large", @"Extra Large"]];
-    NSInteger idx = [tweakDefaults integerForKey:TWABKeyChatTextScale];
-    if (idx < 0 || idx > 2) idx = 0;
-    seg.selectedSegmentIndex = idx;
-    [seg addTarget:self action:@selector(textSizeChanged:) forControlEvents:UIControlEventValueChanged];
-    seg.translatesAutoresizingMaskIntoConstraints = NO;
-
-    [cell.contentView addSubview:title];
-    [cell.contentView addSubview:seg];
-    [NSLayoutConstraint activateConstraints:@[
-        [title.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-        [title.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
-        [seg.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-        [seg.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
-        [seg.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:8],
-    ]];
-    return cell;
+    return [self scaleMenuCellWithTitle:LOC(@"settings.textsize.title", @"Chat Text Size")
+                               subtitle:LOC(@"settings.textsize.desc", @"How big chat messages are.")
+                                    key:TWABKeyChatTextScale identifier:@"TextSizeCell"];
 }
 
-- (void)textSizeChanged:(UISegmentedControl *)seg {
-    [tweakDefaults setInteger:seg.selectedSegmentIndex forKey:TWABKeyChatTextScale];
+// iOS 13 (no menus): tapping the row steps to the next size.
+- (void)stepScaleForKey:(NSString *)key {
+    NSInteger next = ([tweakDefaults integerForKey:key] + 1) % 3;
+    [tweakDefaults setInteger:next forKey:key];
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:2]
+                  withRowAnimation:UITableViewRowAnimationNone];
 }
 
-#pragma mark - Tools (reload / export / import / diagnostics)
+#pragma mark - Tools (reload / export / import)
 
 // The subset of defaults keys that export/import round-trips. Proxy list,
 // every toggle, and the launch tab/sub-tab. Deliberately excludes one-shot
@@ -1471,21 +1614,21 @@ static NSArray<NSString *> *twab_exportKeys(void) {
               TWABKeyEmotesEnabled, TWABKeyLaunchTab, TWABKeyLaunchSubTab,
               TWABKeyHideStories, TWABKeyDisableWatchLimit,
               TWABKeyHideAdFreeButton, TWABKeyHidePickerButton,
-              TWABKeyKeepDeletedMessages, TWABKeyHighlightDeletedNotes,
-              TWABKeyHideRecapsBar, TWABKeyFitWideEmotes, TWABKeyHideCreateTab,
+              TWABKeyKeepDeletedMessages,
+              TWABKeyHideRecapsBar, TWABKeyHideCreateTab,
               TWABKeyHideLeaderboard, TWABKeyHideSubscribe, TWABKeyHideBits,
               TWABKeyHideChannelBar, TWABKeyHideExtensions,
               TWABKeyHideCommunityHighlights,
               TWABKeyHidePinnedMessages, TWABKeyHideHypeTrains,
               TWABKeyHidePredictions, TWABKeyHidePolls,
               TWABKeyHideSubGoal, TWABKeyHideDrops,
-              TWABKeyDismissPinnedSeconds,
               TWABKeyHideClipButton, TWABKeyAutoClaimPoints,
               TWABKeyProxyWhitelist,
               TWABKeyChatEmoteScale,
               TWABKeyChatTextScale,
               TWABKeyPreferredProxy,
-              TWABKeyBlockTracking ];
+              TWABKeyBlockTracking,
+              TWABKeyStreamRewind ];
 }
 
 - (void)openKofi {
@@ -1628,17 +1771,6 @@ static NSArray<NSString *> *twab_exportKeys(void) {
     [self presentViewController:a animated:YES completion:nil];
 }
 
-- (void)showDiagnostics {
-    TWABDiagnosticsVC *vc = [[TWABDiagnosticsVC alloc] initWithStyle:UITableViewStyleGrouped];
-    if (self.navigationController) {
-        [self.navigationController pushViewController:vc animated:YES];
-    } else {
-        UINavigationController *nav = [[UINavigationController alloc]
-            initWithRootViewController:vc];
-        [self presentViewController:nav animated:YES completion:nil];
-    }
-}
-
 - (void)customProxySwitchChanged:(UISwitch *)sw {
     [tweakDefaults setBool:sw.on forKey:TWABKeyAdBlockCustomProxyEnabled];
     self.customProxyEnabled = sw.on;
@@ -1674,6 +1806,22 @@ static NSArray<NSString *> *twab_exportKeys(void) {
 - (void)reloadStatusRow {
     if (!self.adblockEnabled || !self.proxyEnabled) return;
     NSIndexPath *path = [NSIndexPath indexPathForRow:[self statusRowIndex] inSection:1];
+    UITableViewCell *visible = [self.tableView cellForRowAtIndexPath:path];
+    if (!self.customProxyEnabled && [visible.reuseIdentifier isEqualToString:@"DefaultProxyMenuCell"]) {
+        twab_inPlaceProxyCell = visible;
+        [self proxyStatusCell];
+        twab_inPlaceProxyCell = nil;
+        return;
+    }
+    if (self.customProxyEnabled) {
+        for (NSIndexPath *ip in self.tableView.indexPathsForVisibleRows) {
+            if (ip.section != 1) continue;
+            NSInteger idx = [self proxyIndexForRow:ip.row];
+            UITableViewCell *c = [self.tableView cellForRowAtIndexPath:ip];
+            if (idx >= 0 && [c.reuseIdentifier isEqualToString:@"ProxyMenuRowCell"])
+                [self proxyMenuRowCellForIndex:idx inPlace:c];
+        }
+    }
     [self.tableView reloadRowsAtIndexPaths:@[path]
                           withRowAnimation:UITableViewRowAnimationNone];
 }
@@ -1685,43 +1833,58 @@ static NSArray<NSString *> *twab_exportKeys(void) {
     return YES;
 }
 
-// The per-row text field handler (proxyFieldChanged:) writes the array
-// back to defaults on every keystroke. The status probe is heavier; only
-// run it when the user finishes editing.
-- (void)textFieldDidEndEditing:(UITextField *)textField {
-    UITableViewCell *cell = [self cellForSubview:textField];
-    NSIndexPath *path = [self.tableView indexPathForCell:cell];
-    NSInteger idx = [self proxyIndexForRow:path.row];
-    if (idx >= 0 && idx < (NSInteger)self.proxies.count) {
-        self.proxies[idx] = textField.text ?: @"";
-        [self saveProxiesToDefaults];
+// Turns whatever was typed ("@Name, twitch.tv/other  third") into clean,
+// lower-case channel names, each once.
+static NSArray<NSString *> *twab_cleanChannelList(NSString *raw) {
+    NSMutableCharacterSet *seps = [NSMutableCharacterSet characterSetWithCharactersInString:@",;"];
+    [seps formUnionWithCharacterSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableOrderedSet<NSString *> *out = [NSMutableOrderedSet orderedSet];
+    for (NSString *part in [raw ?: @"" componentsSeparatedByCharactersInSet:seps]) {
+        NSString *name = part.lowercaseString;
+        NSRange tv = [name rangeOfString:@"twitch.tv/"];
+        if (tv.location != NSNotFound) name = [name substringFromIndex:NSMaxRange(tv)];
+        name = [[name componentsSeparatedByString:@"/"] firstObject] ?: @"";
+        name = [[name componentsSeparatedByString:@"?"] firstObject] ?: @"";
+        while ([name hasPrefix:@"@"]) name = [name substringFromIndex:1];
+        if (name.length) [out addObject:name];
     }
-    if (self.proxyEnabled && self.customProxyEnabled) [self refreshProxyStatus];
+    return out.array;
 }
 
 - (void)presentWhitelistEditor {
-    NSString *current = [tweakDefaults stringForKey:TWABKeyProxyWhitelist] ?: @"";
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Skip Proxy for Channels"
-        message:@"Enter channel names separated by commas. These channels won't use the ad-block proxy.\n\nChannels you're subscribed to already skip the proxy automatically."
-        preferredStyle:UIAlertControllerStyleAlert];
+    NSArray *current = twab_cleanChannelList([tweakDefaults stringForKey:TWABKeyProxyWhitelist]);
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:LOC(@"settings.whitelist.title", @"Skip Proxy for Channels")
+                         message:LOC(@"settings.whitelist.editor.desc",
+                                     @"Channels that always play without the proxy, separated by commas. "
+                                     @"Channels you're subscribed to already skip it.")
+                  preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.text = current;
+        tf.text = [current componentsJoinedByString:@", "];
         tf.placeholder = @"channel1, channel2";
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
         tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.spellCheckingType = UITextSpellCheckingTypeNo;
+        tf.keyboardType = UIKeyboardTypeASCIICapable;
+        tf.returnKeyType = UIReturnKeyDone;
     }];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     __weak typeof(self) weakSelf = self;
-    [alert addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        NSString *val = alert.textFields.firstObject.text ?: @"";
-        val = [val stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (val.length)
-            [tweakDefaults setObject:val forKey:TWABKeyProxyWhitelist];
+    __weak UIAlertController *weakAlert = alert;
+    [alert addAction:[UIAlertAction actionWithTitle:LOC(@"settings.launch.cancel", @"Cancel")
+                                              style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:LOC(@"settings.proxy.save", @"Save")
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *_) {
+        NSArray *names = twab_cleanChannelList(weakAlert.textFields.firstObject.text);
+        if (names.count)
+            [tweakDefaults setObject:[names componentsJoinedByString:@", "] forKey:TWABKeyProxyWhitelist];
         else
             [tweakDefaults removeObjectForKey:TWABKeyProxyWhitelist];
         [weakSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
                           withRowAnimation:UITableViewRowAnimationNone];
     }]];
+    alert.preferredAction = alert.actions.lastObject;
     [self presentViewController:alert animated:YES completion:nil];
 }
 

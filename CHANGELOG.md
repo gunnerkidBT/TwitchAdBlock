@@ -5,6 +5,49 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## v0.1.27 — November 28, 2026
+
+**Stream Rewind.** Rewind a live stream without leaving it. Drag the bar on
+the player to go back, double-tap the left or right of the video to skip, and
+tap Jump to Live to catch up again. Chat keeps going live the whole time. It
+works on channels that save their past broadcasts. This is an unreleased
+feature Twitch is still building, so it's marked experimental and off by
+default: turn it on in Settings → Home & Playback → Stream Rewind.
+
+**Nicer pickers in settings.** Launch Screen and Default Proxy now open a
+proper iOS menu right where you tap, with an icon for each choice and a
+checkmark on the current one, and each row shows what's picked ("Home · Live",
+"Automatic"). Launch Screen is grouped into Home and Browse. Default Proxy
+shows each country's current speed, or Offline, under its name, and the
+server status now sits under the row's title.
+
+**Tidier Custom Proxy list.** Each of your proxies now shows its server
+(without the password) and its current speed or Offline. Tap one for Edit,
+Move Up, Move Down or Delete. Add Proxy opens a box to type the address in,
+and tells you if it doesn't look right.
+
+**One look for all settings.** Every setting now has the same layout: its name,
+a short line under it saying what it does, and on the right a switch, the
+current choice, or an arrow. Emote Size and Chat Text Size are now menus like
+Launch Screen, and Skip Proxy for Channels shows your list under its name
+instead of cutting it off.
+
+**Deleted message notes read like Twitch's.** With Keep Deleted Messages on,
+the note under a removed message now uses Twitch's own wording, like
+"name's message was deleted by a moderator", "name has been timed out for 600
+seconds." or "name is now banned from this channel.", without the shield icon.
+They're now always a plain grey line like Twitch's own notices, so the
+Highlight Notes option is gone.
+
+**Wide emotes always keep their shape.** The Keep Wide Emote Shape setting is
+gone. Wide 7TV, BTTV and FFZ emotes now always show at full size in their real
+shape, for everyone.
+
+**Diagnostics removed.** The Diagnostics screen under Tools is gone; Tools now
+has just Export Settings and Import Settings.
+
+---
+
 ## v0.1.26 — November 27, 2026
 
 **Block Tracking.** A new switch under Ad Blocking, on by default, stops

@@ -17,9 +17,7 @@ NSString *const TWABKeyDisableWatchLimit         = @"TWDisableWatchLimit";
 NSString *const TWABKeyRecentEmotes              = @"TWRecentEmotes";
 NSString *const TWABKeyHidePickerButton          = @"TWHidePickerButton";
 NSString *const TWABKeyKeepDeletedMessages       = @"TWKeepDeletedMessages";
-NSString *const TWABKeyHighlightDeletedNotes     = @"TWHighlightDeletedNotes";
 NSString *const TWABKeyHideRecapsBar             = @"TWHideRecapsBar";
-NSString *const TWABKeyFitWideEmotes             = @"TWFitWideEmotes";
 NSString *const TWABKeyHideCreateTab             = @"TWHideCreateTab";
 NSString *const TWABKeyHideLeaderboard           = @"TWHideLeaderboard";
 NSString *const TWABKeyHideSubscribe             = @"TWHideSubscribe";
@@ -33,13 +31,13 @@ NSString *const TWABKeyHideHypeTrains            = @"TWHideHypeTrains";
 NSString *const TWABKeyHidePredictions           = @"TWHidePredictions";
 NSString *const TWABKeyHidePolls                 = @"TWHidePolls";
 NSString *const TWABKeyHideDrops                 = @"TWHideDrops";
-NSString *const TWABKeyDismissPinnedSeconds      = @"TWDismissPinnedSeconds";
 NSString *const TWABKeyHideClipButton            = @"TWHideClipButton";
 NSString *const TWABKeyProxyWhitelist            = @"TWProxyWhitelist";
 NSString *const TWABKeyChatEmoteScale            = @"TWChatEmoteScale";
 NSString *const TWABKeyChatTextScale             = @"TWChatTextScale";
 NSString *const TWABKeyPreferredProxy            = @"TWPreferredProxy";
 NSString *const TWABKeyBlockTracking             = @"TWBlockTracking";
+NSString *const TWABKeyStreamRewind              = @"TWStreamRewind";
 
 // The default servers: the list from the repo when there is a valid one,
 // otherwise the one built into the app (Secrets.h). Each @{ name, addr, backup }.

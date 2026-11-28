@@ -56,11 +56,15 @@ A modified Twitch iOS app that blocks ads and adds some handy extras.
 ### Chat
 - **Emote Size** and **Chat Text Size** — make emotes and chat messages bigger
   (Default, Large, Extra Large) without changing the rest of the app.
-- **Keep Deleted Messages** — see messages a moderator removed, with an
-  optional highlighted note.
+- **Keep Deleted Messages** — see messages a moderator removed, with a note
+  saying what happened, worded like Twitch's own.
 - **Auto-Claim Bonus Points** — collects the channel points bonus for you.
 
 ### Make the app yours
+- **Stream Rewind** — rewind a live stream right in the player: drag the bar,
+  double-tap to skip, and jump back to live, without leaving for the Videos tab.
+  Works on channels that save past broadcasts. An unreleased Twitch feature, so it's
+  experimental and off by default.
 - **Keep Live Feed Playing** — stops the Live feed cutting a stream off and
   forcing you to tap Watch or Follow.
 - **Pick your launch screen** — open straight to Following, Live, Clips, Browse,
@@ -74,8 +78,6 @@ A modified Twitch iOS app that blocks ads and adds some handy extras.
 
 ### Extras
 - **Back up & restore** all your settings to a file (handy when you reinstall).
-- **Diagnostics** screen — a quick green/red check that everything still works
-  after a Twitch update.
 
 For a plain-language list of everything that's changed, see
 [CHANGELOG.md](CHANGELOG.md).

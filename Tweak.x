@@ -194,8 +194,92 @@ BOOL twab_isExternalPlayback(void) {
 static _Atomic uint64_t twab_adDetectCount;
 static _Atomic double twab_lastAdLogTime;
 
+// Stream Rewind plays the stream's VOD: its master playlist comes from
+// usher (/vod/), its quality playlists from the VOD CDN (CloudFront etc.),
+// which the live check above never looked at. Every VOD playlist is scanned
+// whole for ad markers; each one logs a line the first time and whenever its
+// ad markers change, so it's clear whether rewinding brings ads.
+static void twab_checkVodPlaylistForAds(NSData *data, NSURLRequest *request) {
+  NSString *host = request.URL.host, *path = request.URL.path;
+  if (!host || ![path hasSuffix:@".m3u8"]) return;
+  // Quality playlists are recognised from the VOD master's own list of them.
+  static NSMutableSet<NSString *> *vodPlaylistURLs;
+  static dispatch_once_t setOnce;
+  dispatch_once(&setOnce, ^{ vodPlaylistURLs = [NSMutableSet set]; });
+  BOOL vodMaster = [host isEqualToString:@"usher.ttvnw.net"] && [path hasPrefix:@"/vod/"];
+  NSString *bare = [host stringByAppendingString:path];
+  BOOL vodMedia;
+  @synchronized (vodPlaylistURLs) { vodMedia = [vodPlaylistURLs containsObject:bare]; }
+  if (!vodMedia) vodMedia = [path containsString:@"index-dvr"] || [path containsString:@"index-muted"];
+  if (!vodMaster && !vodMedia) return;
+  if (data.length < 7) return;
+  NSData *head = [data subdataWithRange:NSMakeRange(0, 7)];
+  if (![head isEqualToData:[@"#EXTM3U" dataUsingEncoding:NSUTF8StringEncoding]]) return;
+  if (vodMaster) {
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+    NSMutableArray *hosts = [NSMutableArray array];
+    for (NSString *line in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+      if (![line hasPrefix:@"http"]) continue;
+      NSURL *u = [NSURL URLWithString:[line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]];
+      if (!u.host || !u.path) continue;
+      @synchronized (vodPlaylistURLs) { [vodPlaylistURLs addObject:[u.host stringByAppendingString:u.path]]; }
+      if (![hosts containsObject:u.host]) [hosts addObject:u.host];
+    }
+    os_log(OS_LOG_DEFAULT, "[TWAB-Rewind-Ads] VOD qualities served from %{public}@",
+           hosts.count ? [hosts componentsJoinedByString:@", "] : @"(none listed)");
+  }
+
+  static NSArray<NSString *> *markers;
+  static NSMutableDictionary<NSString *, NSString *> *seen;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    markers = @[@"stitched-ad", @"twitch-stitched", @"twitch-ad", @"X-TV-TWITCH-AD", @"SCTE35",
+                @"EXT-X-CUE-OUT", @"EXT-X-CUE-IN", @"amazon", @"Amazon", @"preroll", @"midroll",
+                @"video-weaver", @"\"ad\"", @"CLASS=\"ad"];
+    seen = [NSMutableDictionary dictionary];
+  });
+  NSMutableArray *found = [NSMutableArray array];
+  NSRange firstHit = NSMakeRange(NSNotFound, 0);
+  for (NSString *m in markers) {
+    NSData *needle = [m dataUsingEncoding:NSUTF8StringEncoding];
+    NSRange r = [data rangeOfData:needle options:0 range:NSMakeRange(0, data.length)];
+    if (r.location == NSNotFound) continue;
+    [found addObject:m];
+    if (firstHit.location == NSNotFound || r.location < firstHit.location) firstHit = r;
+  }
+  // Discontinuities usually mark where something was spliced in.
+  NSUInteger disc = 0;
+  NSData *discNeedle = [@"#EXT-X-DISCONTINUITY" dataUsingEncoding:NSUTF8StringEncoding];
+  NSRange search = NSMakeRange(0, data.length);
+  while (disc < 1000) {
+    NSRange r = [data rangeOfData:discNeedle options:0 range:search];
+    if (r.location == NSNotFound) break;
+    disc++;
+    search = NSMakeRange(NSMaxRange(r), data.length - NSMaxRange(r));
+  }
+  NSString *summary = found.count ? [found componentsJoinedByString:@","] : @"none";
+  NSString *key = [host stringByAppendingString:path];
+  @synchronized (seen) {
+    if ([seen[key] isEqualToString:summary]) return;
+    seen[key] = summary;
+  }
+  NSString *snippet = @"";
+  if (firstHit.location != NSNotFound) {
+    NSUInteger start = firstHit.location > 80 ? firstHit.location - 80 : 0;
+    NSUInteger len = MIN((NSUInteger)240, data.length - start);
+    snippet = [[NSString alloc] initWithData:[data subdataWithRange:NSMakeRange(start, len)]
+                                    encoding:NSUTF8StringEncoding] ?: @"";
+    snippet = [snippet stringByReplacingOccurrencesOfString:@"\n" withString:@" | "];
+  }
+  os_log(OS_LOG_DEFAULT,
+         "[TWAB-Rewind-Ads] %{public}s %{public}@%{public}@ (%lu KB, %lu discontinuities): ad markers %{public}@%{public}@%{public}@",
+         vodMaster ? "VOD master" : "VOD playlist", host, path, (unsigned long)(data.length / 1024),
+         (unsigned long)disc, summary, snippet.length ? @" — " : @"", snippet);
+}
+
 void twab_checkPlaylistForAds(NSData *data, NSURLRequest *request) {
   if (!data.length || !request) return;
+  twab_checkVodPlaylistForAds(data, request);
   NSString *host = request.URL.host;
   if (!host || !twab_isPlaylistHost(host)) return;
   NSString *path = request.URL.path;
@@ -237,8 +321,10 @@ void twab_checkPlaylistForAds(NSData *data, NSURLRequest *request) {
   NSURLRequest *untracked = twab_trackingBlockedRequest(request);
   if (untracked) return %orig(untracked);
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) return %orig;
-  if (twab_isAdHost(request.URL.host))
+  if (twab_isAdHost(request.URL.host)) {
+    os_log(OS_LOG_DEFAULT, "[TWAB-Rewind-Ads] blocked ad host %{public}@", request.URL.host);
     return nil;
+  }
   if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
   ((NSMutableURLRequest *)request).HTTPBody = [request.HTTPBody twab_requestDataForRequest:request];
   if (![tweakDefaults boolForKey:TWABKeyAdBlockProxyEnabled]) return %orig;
@@ -573,10 +659,9 @@ static NSCache *twab_emoteFitCache(void) {
 // The padded result is also kept on disk (empty file = "leave as is") so
 // each emote is only processed once, not on every launch. The CDN images
 // behind these URLs never change.
-// Cache key: the result depends on Keep Wide Emote Shape.
+// Cache key for the padded (wide-shape) version of an emote.
 static NSString *twab_fitKey(NSURL *url) {
-  return [url.absoluteString stringByAppendingString:
-          [tweakDefaults boolForKey:TWABKeyFitWideEmotes] ? @"#pad" : @"#nopad"];
+  return [url.absoluteString stringByAppendingString:@"#pad"];
 }
 
 static NSString *twab_fitDiskPath(NSURL *url) {
@@ -636,7 +721,7 @@ static NSData *twab_fitEmoteImage(NSURL *url, NSData *data) {
   NSData *cached = twab_cachedFitEmote(url, data);
   if (cached) return cached;
   twab_recordEmoteAspect(url, data);
-  NSData *padded = twab_padEmoteToSquare(data, [tweakDefaults boolForKey:TWABKeyFitWideEmotes]);
+  NSData *padded = twab_padEmoteToSquare(data, YES);
   if (url) {
     [twab_emoteFitCache() setObject:padded ?: (id)kCFNull forKey:twab_fitKey(url)];
     NSString *path = twab_fitDiskPath(url);
@@ -711,6 +796,132 @@ static void twab_deliverEmote(id delegate, NSURLSession *session, NSURLSessionTa
   objc_setAssociatedObject(task, &twab_emoteFlushingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+// ─── Stream Rewind ───────────────────────────────────────────────────────────
+// Twitch 32.2 has its own live rewind (scrub bar, double-tap skip, Jump to
+// Live) that plays the stream's in-progress VOD. It needs two things the app
+// only gets for viewers in Twitch's rollout: the savvy flags (added to the
+// React Native start-up flag overrides below) and channel.self.dvr.vodID in
+// NativeChannelLiveQuery, which the server leaves null. That VOD is the
+// channel's archive that is recording right now, so it's looked up (started as
+// soon as the live query is sent, and remembered for a few minutes) and filled
+// in before the response reaches the app. Any failure leaves it unchanged.
+@interface TWABDvrLookup : NSObject
+@property (nonatomic) BOOL finished;
+@property (nonatomic, copy) NSString *vodID;
+@property (nonatomic) CFAbsoluteTime started;
+@property (nonatomic, strong) NSMutableArray *waiters;
+@end
+@implementation TWABDvrLookup
+@end
+
+static NSString *twab_dvrLoginFromRequest(NSURLRequest *request) {
+  if (!request.HTTPBody.length) return nil;
+  id body = [NSJSONSerialization JSONObjectWithData:request.HTTPBody options:0 error:nil];
+  NSArray *ops = [body isKindOfClass:NSArray.class] ? body : (body ? @[body] : @[]);
+  for (NSDictionary *op in ops) {
+    if (![op isKindOfClass:NSDictionary.class]) continue;
+    if (![op[@"operationName"] isEqual:@"NativeChannelLiveQuery"]) continue;
+    NSDictionary *vars = op[@"variables"];
+    if ([vars isKindOfClass:NSDictionary.class] && [vars[@"login"] isKindOfClass:NSString.class])
+      return [vars[@"login"] lowercaseString];
+  }
+  return nil;
+}
+
+static void twab_dvrFetchLiveVod(NSURLRequest *original, NSString *login, void (^done)(NSString *vodID)) {
+  NSString *safe = [[login componentsSeparatedByCharactersInSet:
+      [[NSCharacterSet characterSetWithCharactersInString:
+        @"abcdefghijklmnopqrstuvwxyz0123456789_"] invertedSet]] componentsJoinedByString:@""];
+  if (!safe.length) { done(nil); return; }
+  NSString *q = [NSString stringWithFormat:
+      @"query{user(login:\"%@\"){videos(first:1,type:ARCHIVE,sort:TIME){edges{node{id status}}}}}", safe];
+  NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://gql.twitch.tv/gql"]];
+  req.HTTPMethod = @"POST";
+  req.timeoutInterval = 4;
+  for (NSString *h in @[@"Client-Id", @"Authorization", @"X-Device-Id", @"Accept-Language", @"User-Agent"]) {
+    NSString *v = [original valueForHTTPHeaderField:h];
+    if (v) [req setValue:v forHTTPHeaderField:h];
+  }
+  [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+  req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{ @"query": q } options:0 error:nil];
+  NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
+  [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+    NSString *vodID = nil, *status = nil;
+    id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    @try {
+      NSDictionary *node = json[@"data"][@"user"][@"videos"][@"edges"][0][@"node"];
+      if ([node isKindOfClass:NSDictionary.class]) {
+        status = node[@"status"];
+        if ([status isEqual:@"RECORDING"] && [node[@"id"] isKindOfClass:NSString.class]) vodID = node[@"id"];
+      }
+    } @catch (__unused id e) {}
+    BOOL gqlError = [json isKindOfClass:NSDictionary.class] && json[@"errors"];
+    os_log(OS_LOG_DEFAULT, "[TWAB-Rewind] %{public}@: %{public}@%{public}@", safe,
+           vodID ? [@"VOD " stringByAppendingString:vodID]
+                 : [NSString stringWithFormat:@"no live VOD (latest is %@)", status ?: @"none"],
+           err ? @", request failed" : (gqlError ? @", query error" : @""));
+    [session finishTasksAndInvalidate];
+    done(vodID);
+  }] resume];
+}
+
+// One lock for the lookups and their waiters.
+static NSObject *twab_dvrLock(void) {
+  static NSObject *lock;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ lock = [NSObject new]; });
+  return lock;
+}
+
+// The lookup for `login`: a recent one, or a new one started now.
+static TWABDvrLookup *twab_dvrLookup(NSURLRequest *request, NSString *login) {
+  static NSMutableDictionary<NSString *, TWABDvrLookup *> *lookups;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ lookups = [NSMutableDictionary dictionary]; });
+  CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+  TWABDvrLookup *l;
+  @synchronized (twab_dvrLock()) {
+    l = lookups[login];
+    // Found: good for 5 minutes (a new broadcast gets a new VOD). Not found: 1.
+    CFTimeInterval keep = l.vodID ? 300 : 60;
+    if (l && (!l.finished || now - l.started < keep)) return l;
+    l = [TWABDvrLookup new];
+    l.started = now;
+    l.waiters = [NSMutableArray array];
+    lookups[login] = l;
+  }
+  twab_dvrFetchLiveVod(request, login, ^(NSString *vodID) {
+    NSArray *waiters;
+    @synchronized (twab_dvrLock()) {
+      l.vodID = vodID;
+      l.finished = YES;
+      waiters = [l.waiters copy];
+      [l.waiters removeAllObjects];
+    }
+    for (void (^w)(NSString *) in waiters) w(vodID);
+  });
+  return l;
+}
+
+static void twab_dvrWhenFound(TWABDvrLookup *l, void (^block)(NSString *vodID)) {
+  BOOL ready = NO;
+  NSString *vod = nil;
+  @synchronized (twab_dvrLock()) {
+    if (l.finished) { ready = YES; vod = l.vodID; }
+    else [l.waiters addObject:[block copy]];
+  }
+  if (ready) block(vod);
+}
+
+// Exported for the __NSURLSessionLocal task hook (Emotes.x): starts the lookup
+// as the live query goes out, so it's usually done when the response lands.
+void twab_streamRewindPrefetch(NSURLRequest *request) {
+  if (![tweakDefaults boolForKey:TWABKeyStreamRewind]) return;
+  if (!twab_requestNamesOperation(request, @"NativeChannelLiveQuery")) return;
+  NSString *login = twab_dvrLoginFromRequest(request);
+  if (login) twab_dvrLookup(request, login);
+}
+
 // Called from didCompleteWithError:. Returns NO if nothing was held (caller
 // completes normally). Otherwise the held image is delivered and then
 // `complete` (the original didCompleteWithError:) runs:
@@ -726,6 +937,40 @@ static BOOL twab_completeHeldEmote(id delegate, NSURLSession *session, NSURLSess
     twab_emoteNetEnd(task.originalRequest.URL, 0, 0, task.error, 0);
   if (!buf || ![task isKindOfClass:NSURLSessionDataTask.class]) return NO;
   objc_setAssociatedObject(task, &twab_emoteBufferKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  if (objc_getAssociatedObject(task, &twab_wholeResponseHeldKey) &&
+      twab_requestNamesOperation(task.originalRequest, @"NativeChannelLiveQuery")) {
+    NSData *nullID = [@"\"vodID\":null" dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *login = twab_dvrLoginFromRequest(task.originalRequest);
+    if (!login || task.error ||
+        [buf rangeOfData:nullID options:0 range:NSMakeRange(0, buf.length)].location == NSNotFound) {
+      // Twitch sending the VOD itself means rewind has reached this account.
+      NSData *dvrField = [@"\"dvr\":{\"vodID\":\"" dataUsingEncoding:NSUTF8StringEncoding];
+      if (login && !task.error && [buf rangeOfData:dvrField options:0 range:NSMakeRange(0, buf.length)].location != NSNotFound)
+        os_log(OS_LOG_DEFAULT, "[TWAB-Rewind] Twitch sent the rewind VOD itself for %{public}@ — Stream Rewind is live for this account", login);
+      twab_deliverEmote(delegate, session, task, buf);
+      complete();
+      return YES;
+    }
+    NSData *held = [buf copy];
+    twab_dvrWhenFound(twab_dvrLookup(task.originalRequest, login), ^(NSString *vodID) {
+      NSData *out = held;
+      if (vodID) {
+        NSString *str = [[NSString alloc] initWithData:held encoding:NSUTF8StringEncoding];
+        NSString *filled = [str stringByReplacingOccurrencesOfString:@"\"vodID\":null"
+            withString:[NSString stringWithFormat:@"\"vodID\":\"%@\"", vodID]];
+        NSData *d = [filled dataUsingEncoding:NSUTF8StringEncoding];
+        if (d) out = d;
+      }
+      void (^finish)(void) = ^{
+        twab_deliverEmote(delegate, session, task, out);
+        complete();
+      };
+      NSOperationQueue *q = session.delegateQueue;
+      if (q) [q addOperationWithBlock:finish];
+      else dispatch_async(dispatch_get_main_queue(), finish);
+    });
+    return YES;
+  }
   if (objc_getAssociatedObject(task, &twab_wholeResponseHeldKey)) {
     NSData *edited = [buf twab_dataHidingLeaderboardsForRequest:task.originalRequest];
     if (twab_requestNamesOperation(task.originalRequest, @"ChatEmoteSets"))
@@ -797,6 +1042,9 @@ static NSData *twab_filteredFeedData(id delegate, NSData *data, NSURLSessionData
          twab_requestNamesOperation(dataTask.originalRequest, @"CurrentUser") ||
          twab_requestNamesOperation(dataTask.originalRequest, @"MwebDiscoveryFeedPreloadQuery")))
       needHold = YES;
+    if (!needHold && [tweakDefaults boolForKey:TWABKeyStreamRewind] &&
+        twab_requestNamesOperation(dataTask.originalRequest, @"NativeChannelLiveQuery"))
+      needHold = YES;  // Stream Rewind: fill in the live VOD
     if (needHold) {
       objc_setAssociatedObject(dataTask, &twab_wholeResponseHeldKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
       return twab_bufferEmoteChunk(data, dataTask);
@@ -1485,24 +1733,6 @@ static void twab_shiftFeedRows(UIView *shelf, CGFloat height) {
   }
 }
 
-// Community highlight auto-dismiss: log GQL operations to find data path.
-static char twab_pinnedDismissKey;
-
-static BOOL twab_isPinnedMessageTestID(NSString *testID) {
-  return [testID isEqualToString:@"highlight-pinned-chat"];
-}
-
-static void twab_schedulePinnedDismiss(UIView *view, NSString *testID) {
-  NSInteger seconds = [tweakDefaults integerForKey:TWABKeyDismissPinnedSeconds];
-  if (seconds <= 0) return;
-  static uint64_t dismissGeneration;
-  uint64_t gen = ++dismissGeneration;
-  NSNumber *genBox = @(gen);
-  objc_setAssociatedObject(view, &twab_pinnedDismissKey, genBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-  os_log(OS_LOG_DEFAULT, "[TWAB-Highlight] scheduled dismiss in %lds for %{public}@",
-         (long)seconds, testID);
-}
-
 // ─── Chat text + emote scaling ──────────────────────────────────────────────
 static BOOL twab_isInsideChatMessageList(UIView *view);
 static CGFloat twab_chatTextScale(void);
@@ -1575,7 +1805,7 @@ static BOOL twab_isChatMessageLine(NSString *str) {
 %hook RCTTextLayoutManager
 - (NSAttributedString *)_nsAttributedStringFromAttributedString:(const void *)attributedString {
   NSAttributedString *result = %orig;
-  if (result.length && [tweakDefaults boolForKey:TWABKeyFitWideEmotes]) {
+  if (result.length) {
     twab_widenMarkedAttachments(result);
     twab_widenSentAttachments(result);
   }
@@ -1703,9 +1933,6 @@ extern void twab_settingsStreamOpened(void);
     __weak UIView *weakNew = view;
     dispatch_async(dispatch_get_main_queue(), ^{ twab_collapseChannelBar(weakNew); });
   }
-  if (twab_isPinnedMessageTestID(identifier)) {
-    twab_schedulePinnedDismiss(view, identifier);
-  }
   if (twab_shouldRemoveTestID(identifier)) {
     objc_setAssociatedObject(view, &twab_declutterHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     view.hidden = YES;
@@ -1804,6 +2031,62 @@ extern void twab_settingsStreamOpened(void);
 }
 %end
 
+// Stream Rewind: the Eppo flags, added to the flag overrides the native app
+// hands React Native at start-up (eppoFlagOverrides, a JSON object as a
+// string, read by parseHostFlagOverrides in AppCore). Whatever is already
+// there is kept.
+static NSDictionary *twab_dvrInjectProps(NSDictionary *props, NSString *module, const char *site) {
+  if (![props isKindOfClass:NSDictionary.class] || ![tweakDefaults boolForKey:TWABKeyStreamRewind]) return props;
+  id cur = props[@"eppoFlagOverrides"];
+  if (!cur && !props[@"clientId"] && !props[@"appVersion"]) return props;
+  NSMutableDictionary *flags = [NSMutableDictionary dictionary];
+  if ([cur isKindOfClass:NSString.class] && [(NSString *)cur length]) {
+    id parsed = [NSJSONSerialization JSONObjectWithData:[(NSString *)cur dataUsingEncoding:NSUTF8StringEncoding]
+                                                options:0 error:nil];
+    if ([parsed isKindOfClass:NSDictionary.class]) [flags addEntriesFromDictionary:parsed];
+  } else if ([cur isKindOfClass:NSDictionary.class]) {
+    [flags addEntriesFromDictionary:cur];
+  }
+  if ([flags[@"savvy-v2-ultralight"] isEqual:@YES] && [flags[@"savvy-double-tap-ultralight"] isEqual:@YES]) {
+    if (cur && ![cur isKindOfClass:NSDictionary.class] && ![props[@"twabRewind"] boolValue])
+      os_log(OS_LOG_DEFAULT, "[TWAB-Rewind] Twitch already turns the rewind flags on itself (%{public}@)", module ?: @"?");
+    return props;  // already on
+  }
+  flags[@"savvy-v2-ultralight"] = @YES;
+  flags[@"savvy-double-tap-ultralight"] = @YES;
+  NSData *json = [NSJSONSerialization dataWithJSONObject:flags options:0 error:nil];
+  NSMutableDictionary *out = [props mutableCopy];
+  out[@"twabRewind"] = @YES;  // marks the overrides as ours
+  out[@"eppoFlagOverrides"] = [cur isKindOfClass:NSDictionary.class]
+      ? flags : ([[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] ?: @"{}");
+  os_log(OS_LOG_DEFAULT, "[TWAB-Rewind] flags on for %{public}@ (%{public}s)", module ?: @"?", site);
+  return out;
+}
+
+%hook RCTHost
+- (id)createSurfaceWithModuleName:(NSString *)moduleName mode:(int)mode initialProperties:(NSDictionary *)properties {
+  return %orig(moduleName, mode, twab_dvrInjectProps(properties, moduleName, "host"));
+}
+- (id)createSurfaceWithModuleName:(NSString *)moduleName initialProperties:(NSDictionary *)properties {
+  return %orig(moduleName, twab_dvrInjectProps(properties, moduleName, "host2"));
+}
+%end
+
+%hook RCTFabricSurface
+- (id)initWithSurfacePresenter:(id)presenter moduleName:(NSString *)moduleName initialProperties:(NSDictionary *)properties {
+  return %orig(presenter, moduleName, twab_dvrInjectProps(properties, moduleName, "surface"));
+}
+- (void)setProperties:(NSDictionary *)properties {
+  %orig(twab_dvrInjectProps(properties, nil, "setProperties"));
+}
+%end
+
+%hook RCTSurfaceHostingProxyRootView
+- (void)setAppProperties:(NSDictionary *)properties {
+  %orig(twab_dvrInjectProps(properties, nil, "appProperties"));
+}
+%end
+
 %hook RCTEnhancedScrollView
 // Hide "From Channels You Follow": Twitch scrolling the feed to its top (e.g. on a new
 // category) stops below the bar's space. Finger drags and bounces are left alone.
@@ -1860,9 +2143,7 @@ static void twab_restoreWideEmote(UIView *view) {
 }
 
 static void twab_layoutWideEmote(UIView *view) {
-  CGFloat q = 0;
-  if ([tweakDefaults boolForKey:TWABKeyFitWideEmotes])
-    q = twab_wideRatioForEmoteId(twab_chatEmoteId(view));
+  CGFloat q = twab_wideRatioForEmoteId(twab_chatEmoteId(view));
   NSArray *orig = objc_getAssociatedObject(view, &twab_wideOrigKey);
   CGFloat h = orig ? [orig[0] CGRectValue].size.height : view.bounds.size.height;
   // Only grow into a slot the text layout actually widened; otherwise the
@@ -2579,32 +2860,11 @@ static void twab_handleAdFree(void) {
 %end
 
 
-// Diagnostics registry. Records whether each hooked Twitch/TwitchKit/Apollo
-// class resolved in the running binary so the settings "Diagnostics" screen
-// can show what's wired vs. what Twitch renamed. Twitch renames Swift classes
-// between versions and Logos silently skips %hook blocks whose target class is
-// absent; without this, a broken feature gives no signal. Apple-private
-// classes (__NSURLSession*) are not tracked — they legitimately vary across
-// iOS versions. Populated once in %ctor; read by twab_classDiagnostics().
-static NSMutableArray<NSDictionary *> *twab_diagStore(void) {
-  static NSMutableArray *a;
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{ a = [NSMutableArray array]; });
-  return a;
-}
-
-// Public accessor for the settings UI. Returns a copy of
-// [{ @"name": NSString, @"present": @(BOOL) }, ...] in registration order.
-NSArray<NSDictionary *> *twab_classDiagnostics(void) {
-  return [twab_diagStore() copy];
-}
-
-// Record a class's presence (and warn to the log if missing). Replaces the
-// old twab_warnIfClassMissing — same logging, plus it feeds the registry.
+// Logs a hooked Twitch class that's missing from this Twitch version. Twitch
+// renames Swift classes between versions and Logos silently skips a %hook
+// whose class is gone, so this is the signal that a feature needs updating.
 static void twab_checkClass(const char *name) {
-  BOOL present = objc_getClass(name) != nil;
-  [twab_diagStore() addObject:@{ @"name": @(name), @"present": @(present) }];
-  if (!present) {
+  if (!objc_getClass(name)) {
     os_log_error(OS_LOG_DEFAULT,
         "[TWAB] missing hook target: %{public}s (Twitch likely renamed it)",
         name);
@@ -2650,8 +2910,9 @@ static void twab_checkClass(const char *name) {
     [tweakDefaults setBool:YES forKey:TWABKeyHideAdFreeButton];
   if (![tweakDefaults objectForKey:TWABKeyBlockTracking])
     [tweakDefaults setBool:YES forKey:TWABKeyBlockTracking];
-  if (![tweakDefaults objectForKey:TWABKeyFitWideEmotes])
-    [tweakDefaults setBool:YES forKey:TWABKeyFitWideEmotes];
+  // Saved values of settings that were removed.
+  for (NSString *gone in @[@"TWDismissPinnedSeconds", @"TWHighlightDeletedNotes", @"TWFitWideEmotes"])
+    if ([tweakDefaults objectForKey:gone]) [tweakDefaults removeObjectForKey:gone];
   // Emote default lives here (not in Emotes.x's %ctor) because Logos
   // doesn't guarantee inter-file %ctor ordering — Emotes.x's %ctor
   // could run before Tweak.x's, when `tweakDefaults` is still nil, and
@@ -2695,8 +2956,6 @@ static void twab_checkClass(const char *name) {
   twab_hookFeedPreload();
   BOOL urlClientPresent = objc_getClass("_TtC9TwitchKit18TKURLSessionClient") ||
                           objc_getClass("_TtC6Apollo16URLSessionClient");
-  [twab_diagStore() addObject:@{ @"name": @"URLSessionClient (TK or Apollo)",
-                                 @"present": @(urlClientPresent) }];
   if (!urlClientPresent) {
     os_log_error(OS_LOG_DEFAULT,
         "[TWAB] missing hook target: neither TKURLSessionClient nor Apollo.URLSessionClient");
